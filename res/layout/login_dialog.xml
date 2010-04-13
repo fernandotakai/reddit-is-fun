@@ -53,7 +53,7 @@
 			
 	<Button android:id="@+id/login_button"
 		android:layout_width="fill_parent"
-		android:layout_height="100dip"
+		android:layout_height="50dip"
 		android:text="@string/login_button"
 		android:textAppearance="?android:attr/textAppearanceLarge"
 		/>
