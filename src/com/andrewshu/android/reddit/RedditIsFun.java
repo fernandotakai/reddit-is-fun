@@ -63,6 +63,7 @@ import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.TextAppearanceSpan;
 import android.util.Log;
+import android.view.ContextMenu;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -71,8 +72,10 @@ import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.ContextMenu.ContextMenuInfo;
 import android.view.View.OnClickListener;
 import android.view.View.OnKeyListener;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -92,6 +95,10 @@ import android.widget.Toast;
 public final class RedditIsFun extends ListActivity {
 
 	private static final String TAG = "RedditIsFun";
+	
+	private static final int SHARE_CONTEXT_ITEM = 0;
+	private static final int OPEN_IN_BROWSER_CONTEXT_ITEM = 1;
+	private static final int OPEN_COMMENTS_CONTEXT_ITEM = 2;
 	
 	private final JsonFactory jsonFactory = new JsonFactory(); 
 	
@@ -149,6 +156,8 @@ public final class RedditIsFun extends ListActivity {
         // The above layout contains a list id "android:list"
         // which ListActivity adopts as its list -- we can
         // access it with getListView().
+        
+        registerForContextMenu(getListView());
 
         if (savedInstanceState != null) {
 	        CharSequence subreddit = savedInstanceState.getCharSequence(ThreadInfo.SUBREDDIT);
@@ -983,6 +992,54 @@ public final class RedditIsFun extends ListActivity {
         MenuInflater inflater = getMenuInflater();
         inflater.inflate(R.menu.subreddit, menu);
         return true;
+    }
+    
+    @Override
+    public void onCreateContextMenu(ContextMenu menu, View v, ContextMenuInfo menuInfo){
+    	super.onCreateContextMenu(menu, v, menuInfo);
+    	
+        menu.add(0, OPEN_IN_BROWSER_CONTEXT_ITEM, 0, "Open in browser");
+    	menu.add(0, SHARE_CONTEXT_ITEM, 0, "Share");
+    	menu.add(0, OPEN_COMMENTS_CONTEXT_ITEM, 0, "Comments");
+    }
+    
+    @Override
+    public boolean onContextItemSelected(MenuItem item) {
+    	AdapterView.AdapterContextMenuInfo info;
+        info = (AdapterView.AdapterContextMenuInfo) item.getMenuInfo();
+        
+        ThreadInfo _item = mThreadsAdapter.getItem(info.position);
+        
+        switch (item.getItemId()) {
+		case SHARE_CONTEXT_ITEM:
+			Intent intent = new Intent();
+			intent.setAction(Intent.ACTION_SEND);
+			intent.setType("text/plain");
+			intent.putExtra(Intent.EXTRA_TEXT, _item.getURL());
+			
+			try {
+				startActivity(Intent.createChooser(intent, "Share Link"));
+			} catch (android.content.ActivityNotFoundException ex) {
+				
+			}
+			
+			return true;
+		case OPEN_IN_BROWSER_CONTEXT_ITEM:
+			Common.launchBrowser(_item.getURL(), this);
+			return true;
+			
+		case OPEN_COMMENTS_CONTEXT_ITEM:
+			Intent i = new Intent(getApplicationContext(), CommentsListActivity.class);
+			i.putExtra(ThreadInfo.SUBREDDIT, _item.getSubreddit());
+			i.putExtra(ThreadInfo.ID, _item.getId());
+			i.putExtra(ThreadInfo.TITLE, _item.getTitle());
+			i.putExtra(ThreadInfo.NUM_COMMENTS, Integer.valueOf(_item.getNumComments()));
+			startActivity(i);
+			
+		default:
+			return super.onContextItemSelected(item);
+		}
+    	
     }
     
     @Override
