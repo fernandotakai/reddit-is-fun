@@ -108,7 +108,7 @@ public class CommentsListActivity extends ListActivity
     // Group 1: fullname. Group 2: kind. Group 3: id36.
     private final Pattern NEW_ID_PATTERN = Pattern.compile("\"id\": \"((.+?)_(.+?))\"");
     // Group 2: subreddit name. Group 3: thread id36. Group 4: Comment id36.
-    private final Pattern COMMENT_CONTEXT_PATTERN = Pattern.compile("(http://www.reddit.com)?/r/(.+?)/comments/(.+?)/.+?/([a-zA-Z0-9]+)");
+    private final Pattern COMMENT_CONTEXT_PATTERN = Pattern.compile("(http://www.reddit.com)?/r/(.+?)/comments/(.+?)/.+?/([a-zA-Z0-9]+)?");
     // Group 1: whole error. Group 2: the time part
     private final Pattern RATELIMIT_RETRY_PATTERN = Pattern.compile("(you are trying to submit too fast. try again in (.+?)\\.)");
 
@@ -213,13 +213,18 @@ public class CommentsListActivity extends ListActivity
         	mSettings.setThreadId(extras.getString(ThreadInfo.ID));
         	mSettings.setSubreddit(extras.getString(ThreadInfo.SUBREDDIT));
         	mThreadTitle = extras.getString(ThreadInfo.TITLE);
-        	setTitle(mThreadTitle + " : " + mSettings.subreddit);
+        	if (mThreadTitle != null) {
+        	  setTitle(mThreadTitle + " : " + mSettings.subreddit);
+        	} else {
+        	  setTitle("reddit is fun");
+        	}
         	int numComments = extras.getInt(ThreadInfo.NUM_COMMENTS);
         	// TODO: Take into account very negative karma comments
         	if (numComments < Constants.DEFAULT_COMMENT_DOWNLOAD_LIMIT)
         		mNumVisibleComments = numComments;
         	else
         		mNumVisibleComments = Constants.DEFAULT_COMMENT_DOWNLOAD_LIMIT;
+        	mShouldUseCommentsCache = false;
     	}
     	
     	if (savedInstanceState != null) {
@@ -696,9 +701,11 @@ public class CommentsListActivity extends ListActivity
     	public Boolean doInBackground(Integer... maxComments) {
     		HttpEntity entity = null;
             try {
-            	StringBuilder sb = new StringBuilder("http://www.reddit.com/r/")
-	        		.append(mSettings.subreddit.toString().trim())
-	        		.append("/comments/")
+            	StringBuilder sb = new StringBuilder("http://www.reddit.com/");
+	        		if (mSettings.subreddit != null) {
+	        		  sb.append("/r/").append(mSettings.subreddit.toString().trim());
+	        		}
+	        		sb.append("/comments/")
 	        		.append(mSettings.threadId)
 	        		.append("/z/").append(_mMoreChildrenId).append(".json?").append(mSortByUrl).append("&");
             	HttpGet request = new HttpGet(sb.toString());
@@ -850,6 +857,11 @@ public class CommentsListActivity extends ListActivity
 										_mNumComments = numComments;
 								} else if (Constants.JSON_SELFTEXT.equals(namefield)) {
 									ti.mSSBSelftext = markdown.markdown(ti.getSelftext(), new SpannableStringBuilder(), ti.mUrls);
+								} else if (Constants.JSON_TITLE.equals(namefield)) {
+								  // We might not have a title if we've intercepted a plain link to a thread.
+								  mThreadTitle = jp.getText();
+								} else if (Constants.JSON_SUBREDDIT.equals(namefield)) {
+								  mSettings.subreddit = jp.getText();
 								}
 							}
 						}
@@ -1041,7 +1053,7 @@ public class CommentsListActivity extends ListActivity
 
     	
     	public void onPreExecute() {
-    		if (mSettings.subreddit == null || mSettings.threadId == null)
+    		if (mSettings.threadId == null)
 	    		this.cancel(true);
     		synchronized (mCurrentDownloadCommentsTaskLock) {
 	    		if (mCurrentDownloadCommentsTask != null)
@@ -1055,7 +1067,7 @@ public class CommentsListActivity extends ListActivity
     		// In case a ReadCacheTask tries to preempt this DownloadCommentsTask
     		mShouldUseCommentsCache = false;
 			
-	    	if ("jailbait".equals(mSettings.subreddit.toString())) {
+	    	if (mSettings.subreddit != null && "jailbait".equals(mSettings.subreddit.toString())) {
 	    		Toast lodToast = Toast.makeText(CommentsListActivity.this, "", Toast.LENGTH_LONG);
 	    		View lodView = ((LayoutInflater) getSystemService(Context.LAYOUT_INFLATER_SERVICE))
 	    			.inflate(R.layout.look_of_disapproval_view, null);
@@ -1078,8 +1090,8 @@ public class CommentsListActivity extends ListActivity
     			// Set title in android titlebar
     			if (mThreadTitle == null) {
 	    			mThreadTitle = mOpThreadInfo.getTitle().replaceAll("\n ", " ").replaceAll(" \n", " ").replaceAll("\n", " ");
-	    			setTitle(mThreadTitle + " : " + mSettings.subreddit);
 	    		}
+    			setTitle(mThreadTitle + " : " + mSettings.subreddit);
 	    		// Remember this time for caching purposes
 	    		mLastRefreshTime = System.currentTimeMillis();
 	    		mShouldUseCommentsCache = true;
