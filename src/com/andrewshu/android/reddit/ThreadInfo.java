@@ -79,6 +79,10 @@ public class ThreadInfo implements Serializable {
 		mValues.put(DOWNS, downs);
 	}
 	
+	public void setSaved(String saved){
+		mValues.put(SAVED, saved);
+	}
+	
 	public void setLikes(String likes) {
 		mValues.put(LIKES, likes);
 	}
@@ -169,6 +173,10 @@ public class ThreadInfo implements Serializable {
 
 	public String getURL() {
 		return mValues.get(URL);
+	}
+	
+	public String getSaved(){
+		return mValues.get(SAVED);
 	}
 	
 	
