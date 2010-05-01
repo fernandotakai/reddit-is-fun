@@ -99,6 +99,8 @@ public final class RedditIsFun extends ListActivity {
 	private static final int SHARE_CONTEXT_ITEM = 0;
 	private static final int OPEN_IN_BROWSER_CONTEXT_ITEM = 1;
 	private static final int OPEN_COMMENTS_CONTEXT_ITEM = 2;
+	private static final int SAVE_CONTEXT_ITEM = 3;
+	private static final int UNSAVE_CONTEXT_ITEM = 4;
 	
 	private final JsonFactory jsonFactory = new JsonFactory(); 
 	
@@ -800,6 +802,132 @@ public final class RedditIsFun extends ListActivity {
     	}
     }
     
+    private class SaveTask extends AsyncTask<Void, Void, Boolean> {
+    	private static final String TAG = "SaveWorker";
+    	
+    	private ThreadInfo _mTargetThreadInfo;
+    	private String _mUserError = "Error voting.";
+    	private String _mUrl;
+    	private String _mExecuted;
+    	private boolean _mSave;
+    	
+    	SaveTask(boolean mSave){
+    		if(mSave){
+    			_mExecuted = "saved";
+    			_mUrl = "http://www.reddit.com/api/save";
+    		} else {
+    			_mExecuted = "unsaved";
+    			_mUrl = "http://www.reddit.com/api/unsave";
+    		}
+    		
+    		_mSave = mSave;
+    		
+    		_mTargetThreadInfo = mVoteTargetThreadInfo;
+    	}
+    	
+    	@Override
+    	public void onPreExecute() {
+    		if (!mSettings.loggedIn) {
+        		Common.showErrorToast("You must be logged in to save.", Toast.LENGTH_LONG, RedditIsFun.this);
+        		cancel(true);
+        		return;
+        	}
+    	}
+    	
+    	@Override
+    	public Boolean doInBackground(Void... v) {
+    		
+    		String status = "";
+        	HttpEntity entity = null;
+        	
+        	if (!mSettings.loggedIn) {
+        		_mUserError = "You must be logged in to save.";
+        		return false;
+        	}
+        	
+        	// Update the modhash if necessary
+        	if (mSettings.modhash == null) {
+        		CharSequence modhash = Common.doUpdateModhash(mClient);
+        		if (modhash == null) {
+        			// doUpdateModhash should have given an error about credentials
+        			Common.doLogout(mSettings, mClient);
+        			if (Constants.LOGGING) Log.e(TAG, "updating save status failed because doUpdateModhash() failed");
+        			return false;
+        		}
+        		mSettings.setModhash(modhash);
+        	}
+        	
+        	List<NameValuePair> nvps = new ArrayList<NameValuePair>();
+			nvps.add(new BasicNameValuePair("id", _mTargetThreadInfo.getName()));
+			nvps.add(new BasicNameValuePair("uh", mSettings.modhash.toString()));
+			//nvps.add(new BasicNameValuePair("executed", _mExecuted));
+    		
+			try {
+				HttpPost request = new HttpPost(_mUrl);
+				request.setHeader("Content-Type", "application/x-www-form-urlencoded");
+				request.setEntity(new UrlEncodedFormEntity(nvps, HTTP.UTF_8));
+				
+				HttpResponse response = mClient.execute(request);
+    	    	status = response.getStatusLine().toString();
+    	    	
+            	if (!status.contains("OK")) {
+            		_mUserError = _mUrl;
+            		throw new HttpException(_mUrl);
+            	}
+            	
+            	entity = response.getEntity();
+
+            	BufferedReader in = new BufferedReader(new InputStreamReader(entity.getContent()));
+            	String line = in.readLine();
+            	in.close();
+            	if (line == null || Constants.EMPTY_STRING.equals(line)) {
+            		_mUserError = "Connection error when voting. Try again.";
+            		throw new HttpException("No content returned from save POST");
+            	}
+            	if (line.contains("WRONG_PASSWORD")) {
+            		_mUserError = "Wrong password.";
+            		throw new Exception("Wrong password.");
+            	}
+            	if (line.contains("USER_REQUIRED")) {
+            		// The modhash probably expired
+            		throw new Exception("User required. Huh?");
+            	}
+            	
+            	Common.logDLong(TAG, line);
+            	
+            	entity.consumeContent();
+            	return true;
+            	
+			} catch (Exception e) {
+        		if (entity != null) {
+        			try {
+        				entity.consumeContent();
+        			} catch (Exception e2) {
+        				if (Constants.LOGGING) Log.e(TAG, e2.getMessage());
+        			}
+        		}
+        		if (Constants.LOGGING) Log.e(TAG, e.getMessage());
+        	}
+			
+        	return false;
+    	}
+    	
+    	@Override
+    	public void onPostExecute(Boolean success) {
+    		if (success) {
+    			if(_mSave){
+    				_mTargetThreadInfo.setSaved("true");
+    				Toast.makeText(RedditIsFun.this, "Saved!", Toast.LENGTH_LONG).show();
+    			} else {
+    				_mTargetThreadInfo.setSaved("false");
+    				Toast.makeText(RedditIsFun.this, "Unsaved!", Toast.LENGTH_LONG).show();
+    			}
+        		mThreadsAdapter.notifyDataSetChanged();
+    		} else {
+    			Common.showErrorToast(_mUserError, Toast.LENGTH_LONG, RedditIsFun.this);
+    		}
+    	}
+    }
     
     private class VoteTask extends AsyncTask<Void, Void, Boolean> {
     	
@@ -998,9 +1126,24 @@ public final class RedditIsFun extends ListActivity {
     public void onCreateContextMenu(ContextMenu menu, View v, ContextMenuInfo menuInfo){
     	super.onCreateContextMenu(menu, v, menuInfo);
     	
-        menu.add(0, OPEN_IN_BROWSER_CONTEXT_ITEM, 0, "Open in browser");
+    	AdapterView.AdapterContextMenuInfo info;
+    	info = (AdapterView.AdapterContextMenuInfo) menuInfo;
+    	ThreadInfo _item = mThreadsAdapter.getItem(info.position);
+    	
+    	mVoteTargetThreadInfo = _item;
+    	
+    	menu.add(0, OPEN_IN_BROWSER_CONTEXT_ITEM, 0, "Open in browser");
     	menu.add(0, SHARE_CONTEXT_ITEM, 0, "Share");
     	menu.add(0, OPEN_COMMENTS_CONTEXT_ITEM, 0, "Comments");
+    	
+    	if(mSettings.loggedIn){
+    		if(_item.getSaved().equals("false")){
+    			menu.add(0, SAVE_CONTEXT_ITEM, 0, "Save");
+    		} else {
+    			menu.add(0, UNSAVE_CONTEXT_ITEM, 0, "Unsave");
+    		}
+    	}
+    	
     }
     
     @Override
@@ -1035,6 +1178,14 @@ public final class RedditIsFun extends ListActivity {
 			i.putExtra(ThreadInfo.TITLE, _item.getTitle());
 			i.putExtra(ThreadInfo.NUM_COMMENTS, Integer.valueOf(_item.getNumComments()));
 			startActivity(i);
+		
+		case SAVE_CONTEXT_ITEM:
+			new SaveTask(true).execute();
+			return true;
+			
+		case UNSAVE_CONTEXT_ITEM:
+			new SaveTask(false).execute();
+			return true;
 			
 		default:
 			return super.onContextItemSelected(item);
