@@ -1,6 +1,5 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
- * Copyright 2009 Andrew Shu
+/*
+ * Copyright 2010 Andrew Shu
  *
  * This file is part of "reddit is fun".
  *
@@ -16,16 +15,24 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with "reddit is fun".  If not, see <http://www.gnu.org/licenses/>.
--->
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-              android:layout_width="wrap_content"
-              android:layout_height="wrap_content"
-              android:background="#eaaa"
-              >
-    <ImageView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:src="@drawable/look_of_disapproval"
-        />
-    
-</FrameLayout>
+ */
+package com.andrewshu.android.reddit;
+
+public class ThingListing {
+	private String kind;
+	private ThingInfo data;
+	
+	public void setKind(String kind) {
+		this.kind = kind;
+	}
+	public String getKind() {
+		return kind;
+	}
+	
+	public void setData(ThingInfo data) {
+		this.data = data;
+	}
+	public ThingInfo getData() {
+		return data;
+	}
+}

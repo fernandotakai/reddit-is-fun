@@ -19,20 +19,16 @@
 
 package com.andrewshu.android.reddit;
 
-import java.io.BufferedReader;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
+import java.beans.PropertyChangeEvent;
+import java.beans.PropertyChangeListener;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.commons.lang.StringEscapeUtils;
+import org.apache.http.Header;
 import org.apache.http.HttpEntity;
-import org.apache.http.HttpException;
 import org.apache.http.HttpResponse;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
@@ -41,10 +37,8 @@ import org.apache.http.client.methods.HttpPost;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.message.BasicNameValuePair;
 import org.apache.http.protocol.HTTP;
-import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonParseException;
-import org.codehaus.jackson.JsonParser;
-import org.codehaus.jackson.JsonToken;
+import org.codehaus.jackson.map.ObjectMapper;
 
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -64,7 +58,6 @@ import android.text.style.ForegroundColorSpan;
 import android.text.style.TextAppearanceSpan;
 import android.util.Log;
 import android.view.ContextMenu;
-import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuInflater;
@@ -74,15 +67,14 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.ContextMenu.ContextMenuInfo;
 import android.view.View.OnClickListener;
-import android.view.View.OnKeyListener;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
-import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.ListView;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -95,12 +87,15 @@ import android.widget.Toast;
 public final class RedditIsFun extends ListActivity {
 
 	private static final String TAG = "RedditIsFun";
-		
-	private final JsonFactory jsonFactory = new JsonFactory(); 
-	
+   
+	private final ObjectMapper om = new ObjectMapper();
+	// DrawableManager helps with filling in thumbnails
+	private DrawableManager drawableManager = new DrawableManager();
+
     /** Custom list adapter that fits our threads data into the list. */
     private ThreadsListAdapter mThreadsAdapter = null;
-    private ArrayList<ThreadInfo> mThreadsList = null;
+    private ArrayList<ThingInfo> mThreadsList = null;
+    private static final Object THREAD_ADAPTER_LOCK = new Object();
 
     private final DefaultHttpClient mClient = Common.getGzipHttpClient();
 	
@@ -108,27 +103,23 @@ public final class RedditIsFun extends ListActivity {
     private final RedditSettings mSettings = new RedditSettings();
     
     // UI State
-    private ThreadInfo mVoteTargetThreadInfo = null;
-    private AsyncTask mCurrentDownloadThreadsTask = null;
+    private ThingInfo mVoteTargetThingInfo = null;
+    private AsyncTask<?, ?, ?> mCurrentDownloadThreadsTask = null;
     private final Object mCurrentDownloadThreadsTaskLock = new Object();
-
-    // Whether it should use the cache. Otherwise download from Internet.
-    volatile private boolean mShouldUseThreadsCache = true;
     
     // Navigation that can be cached
+    // The after, before, and count to navigate away from current page of results
     private CharSequence mAfter = null;
     private CharSequence mBefore = null;
-    private CharSequence mUrlToGetHere = null;
-    private boolean mUrlToGetHereChanged = true;
+    private volatile int mCount = Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT;
+    // The after, before, and count to navigate to current page
+    private CharSequence mLastAfter = null;
+    private CharSequence mLastBefore = null;
+    private volatile int mLastCount = 0;
     private CharSequence mSortByUrl = Constants.ThreadsSort.SORT_BY_HOT_URL;
     private CharSequence mSortByUrlExtra = Constants.EMPTY_STRING;
-    private volatile int mCount = Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT;
     private CharSequence mJumpToThreadId = null;
-    private long mLastRefreshTime = 0;
     // End navigation variables
-    
-    // ProgressDialogs with percentage bars
-    private AutoResetProgressDialog mLoadingThreadsProgress;
     
     // Menu
     private boolean mCanChord = false;
@@ -147,35 +138,40 @@ public final class RedditIsFun extends ListActivity {
         Common.loadRedditPreferences(getApplicationContext(), mSettings, mClient);
         setRequestedOrientation(mSettings.rotation);
         setTheme(mSettings.theme);
+        requestWindowFeature(Window.FEATURE_PROGRESS);
+        requestWindowFeature(Window.FEATURE_INDETERMINATE_PROGRESS);
+    	
+        enableLoadingScreen();
         
-        setContentView(R.layout.threads_list_content);
-        // The above layout contains a list id "android:list"
-        // which ListActivity adopts as its list -- we can
-        // access it with getListView().
-        
-        registerForContextMenu(getListView());
+		Bundle extras = getIntent().getExtras();
+		if (extras != null) {
+			String newSubreddit = extras.getString(Constants.EXTRA_SUBREDDIT);
+			if (newSubreddit != null && !"".equals(newSubreddit)) {
+				if (Constants.LOGGING) Log.d(TAG, "valid EXTRA_SUBREDDIT: " + newSubreddit);
+				mSettings.setSubreddit(newSubreddit);
+			}
+		}
 
         if (savedInstanceState != null) {
-	        CharSequence subreddit = savedInstanceState.getCharSequence(ThreadInfo.SUBREDDIT);
+        	if (Constants.LOGGING) Log.d(TAG, "using savedInstanceState");
+			CharSequence subreddit = savedInstanceState.getCharSequence(Constants.SUBREDDIT_KEY);
 	        if (subreddit != null)
 	        	mSettings.setSubreddit(subreddit);
 	        else
 	        	mSettings.setSubreddit(mSettings.homepage);
-	        mUrlToGetHere = savedInstanceState.getCharSequence(Constants.URL_TO_GET_HERE_KEY);
-		    mCount = savedInstanceState.getInt(Constants.THREAD_COUNT);
-		    mSortByUrl = savedInstanceState.getCharSequence(Constants.ThreadsSort.SORT_BY_KEY);
+	        mCount = savedInstanceState.getInt(Constants.THREAD_COUNT_KEY);
+	        mAfter = savedInstanceState.getCharSequence(Constants.LAST_AFTER_KEY);
+	        mBefore = savedInstanceState.getCharSequence(Constants.LAST_BEFORE_KEY);
+	        mSortByUrl = savedInstanceState.getCharSequence(Constants.ThreadsSort.SORT_BY_KEY);
 		    mJumpToThreadId = savedInstanceState.getCharSequence(Constants.JUMP_TO_THREAD_ID_KEY);
-        } else {
-        	mSettings.setSubreddit(mSettings.homepage);
+		    mVoteTargetThingInfo = savedInstanceState.getParcelable(Constants.VOTE_TARGET_THING_INFO_KEY);
         }
-        new ReadCacheTask().execute();
     }
     
     @Override
     protected void onResume() {
     	super.onResume();
     	int previousTheme = mSettings.theme;
-    	boolean previousLoggedIn = mSettings.loggedIn;
     	Common.loadRedditPreferences(getApplicationContext(), mSettings, mClient);
     	setRequestedOrientation(mSettings.rotation);
     	if (mSettings.theme != previousTheme) {
@@ -184,23 +180,33 @@ public final class RedditIsFun extends ListActivity {
     		setListAdapter(mThreadsAdapter);
     		Common.updateListDrawables(this, mSettings.theme);
     	}
-    	if (mSettings.loggedIn != previousLoggedIn)
-    		mShouldUseThreadsCache = false;
-    	if (mThreadsAdapter == null)
-    		new ReadCacheTask().execute();
-    	else
+    	if (mThreadsAdapter == null) {
+            // Restore the last-viewed page of threads
+            if (mAfter != null)
+            	new DownloadThreadsTask(mSettings.subreddit).execute(mAfter);
+            else if (mBefore != null)
+            	new DownloadThreadsTask(mSettings.subreddit).execute(null, mBefore);
+            else
+            	new DownloadThreadsTask(mSettings.subreddit).execute();
+    	} else {
     		jumpToThread();
+    	}
     	new Common.PeekEnvelopeTask(this, mClient, mSettings.mailNotificationStyle).execute();
     }
     
     /**
-     * Hack to explicitly set background color whenever changing ListView.
+     * Wrapper method to do additional changes associated with changing the content view.
      */
     public void setContentView(int layoutResID) {
     	super.setContentView(layoutResID);
+
     	// HACK: set background color directly for android 2.0
         if (mSettings.theme == R.style.Reddit_Light)
         	getListView().setBackgroundResource(R.color.white);
+        registerForContextMenu(getListView());
+
+        // allow the trackball to select next25 and prev25 buttons
+        getListView().setItemsCanFocus(true);
     }
     
     @Override
@@ -218,27 +224,29 @@ public final class RedditIsFun extends ListActivity {
     	case Constants.ACTIVITY_PICK_SUBREDDIT:
     		if (resultCode == Activity.RESULT_OK) {
     			Bundle extras = intent.getExtras();
-	    		String newSubreddit = extras.getString(ThreadInfo.SUBREDDIT);
-	    		if (newSubreddit != null && !"".equals(newSubreddit)) {
-	    			mSettings.setSubreddit(newSubreddit);
-	    			resetUrlToGetHere();
-	    			new DownloadThreadsTask().execute(newSubreddit);
+	    		String newSubreddit = extras.getString(Constants.EXTRA_SUBREDDIT);
+	    		if (newSubreddit != null && !Constants.EMPTY_STRING.equals(newSubreddit)) {
+	    			mAfter = null;
+	    			mBefore = null;
+	    			resetCount();
+	    			new DownloadThreadsTask(newSubreddit).execute();
 	    		}
     		}
     		break;
     	case Constants.ACTIVITY_SUBMIT_LINK:
     		if (resultCode == Activity.RESULT_OK) {
     			Bundle extras = intent.getExtras();
-	    		String newSubreddit = extras.getString(ThreadInfo.SUBREDDIT);
-	    		String newId = extras.getString(ThreadInfo.ID);
-	    		String newTitle = extras.getString(ThreadInfo.TITLE);
+	    		String newSubreddit = extras.getString(Constants.EXTRA_SUBREDDIT);
+	    		String newId = extras.getString(Constants.EXTRA_ID);
+	    		String newTitle = extras.getString(Constants.EXTRA_TITLE);
 	    		mSettings.setSubreddit(newSubreddit);
 	    		// Start up comments list with the new thread
+	    		CacheInfo.invalidateCachedThread(getApplicationContext());
 	    		Intent i = new Intent(getApplicationContext(), CommentsListActivity.class);
-				i.putExtra(ThreadInfo.SUBREDDIT, newSubreddit);
-				i.putExtra(ThreadInfo.ID, newId);
-				i.putExtra(ThreadInfo.TITLE, newTitle);
-				i.putExtra(ThreadInfo.NUM_COMMENTS, 0);
+				i.putExtra(Constants.EXTRA_SUBREDDIT, newSubreddit);
+				i.putExtra(Constants.EXTRA_ID, newId);
+				i.putExtra(Constants.EXTRA_TITLE, newTitle);
+				i.putExtra(Constants.EXTRA_NUM_COMMENTS, 0);
 				startActivity(i);
     		} else if (resultCode == Constants.RESULT_LOGIN_REQUIRED) {
     			Common.showErrorToast("You must be logged in to make a submission.", Toast.LENGTH_LONG, this);
@@ -249,19 +257,16 @@ public final class RedditIsFun extends ListActivity {
     	}
     }
     
-    
-    final class ThreadsListAdapter extends ArrayAdapter<ThreadInfo> {
+    final class ThreadsListAdapter extends ArrayAdapter<ThingInfo> {
     	static final int THREAD_ITEM_VIEW_TYPE = 0;
     	static final int MORE_ITEM_VIEW_TYPE = 1;
     	// The number of view types
     	static final int VIEW_TYPE_COUNT = 2;
     	public boolean mIsLoading = true;
     	private LayoutInflater mInflater;
-//        private boolean mDisplayThumbnails = false; // TODO: use this
-//        private SparseArray<SoftReference<Bitmap>> mBitmapCache = null; // TODO?: use this?
     	private int mFrequentSeparatorPos = ListView.INVALID_POSITION;
         
-        public ThreadsListAdapter(Context context, List<ThreadInfo> objects) {
+        public ThreadsListAdapter(Context context, List<ThingInfo> objects) {
             super(context, 0, objects);
             mInflater = (LayoutInflater)context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
         }
@@ -272,7 +277,8 @@ public final class RedditIsFun extends ListActivity {
                 // We don't want the separator view to be recycled.
                 return IGNORE_ITEM_VIEW_TYPE;
             }
-            if (position < getCount() - 1 || getCount() < Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT + 1)
+        	// If we are on a subsequent page, return the item view type 
+            if (position < getCount() - 1 || (mAfter == null && mBefore == null))
         		return THREAD_ITEM_VIEW_TYPE;
         	return MORE_ITEM_VIEW_TYPE;
         }
@@ -294,7 +300,7 @@ public final class RedditIsFun extends ListActivity {
             View view;
             Resources res = getResources();
 
-            if (position < getCount() - 1 || getCount() < Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT + 1) {
+            if (position < getCount() - 1 || (mAfter == null && mBefore == null)) {
 	            // Here view may be passed in for re-use, or we make a new one.
 	            if (convertView == null) {
 	                view = mInflater.inflate(R.layout.threads_list_item, null);
@@ -302,7 +308,7 @@ public final class RedditIsFun extends ListActivity {
 	                view = convertView;
 	            }
 	            
-	            ThreadInfo item = this.getItem(position);
+	            ThingInfo item = this.getItem(position);
 	            
 	            // Set the values of the Views for the ThreadsListItem
 	            
@@ -310,20 +316,24 @@ public final class RedditIsFun extends ListActivity {
 	            TextView votesView = (TextView) view.findViewById(R.id.votes);
 	            TextView numCommentsView = (TextView) view.findViewById(R.id.numComments);
 	            TextView subredditView = (TextView) view.findViewById(R.id.subreddit);
+	            TextView nsfwView = (TextView) view.findViewById(R.id.nsfw);
 	//            TextView submissionTimeView = (TextView) view.findViewById(R.id.submissionTime);
 	            ImageView voteUpView = (ImageView) view.findViewById(R.id.vote_up_image);
 	            ImageView voteDownView = (ImageView) view.findViewById(R.id.vote_down_image);
+	            ImageView thumbnailView = (ImageView) view.findViewById(R.id.thumbnail);
+	            View dividerView = view.findViewById(R.id.divider);
+	            ProgressBar indeterminateProgressBar = (ProgressBar) view.findViewById(R.id.indeterminate_progress);
 	            
 	            // Set the title and domain using a SpannableStringBuilder
 	            SpannableStringBuilder builder = new SpannableStringBuilder();
-	            String title = item.getTitle().replaceAll("\n ", " ").replaceAll(" \n", " ").replaceAll("\n", " ");
+	            String title = item.getTitle();
 	            SpannableString titleSS = new SpannableString(title);
 	            int titleLen = title.length();
 	            TextAppearanceSpan titleTAS = new TextAppearanceSpan(getApplicationContext(), R.style.TextAppearance_14sp);
 	            titleSS.setSpan(titleTAS, 0, titleLen, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
 	            if (mSettings.theme == R.style.Reddit_Light) {
 	            	// FIXME: This doesn't work persistently, since "clicked" is not delivered to reddit.com
-		            if (Constants.TRUE_STRING.equals(item.getClicked())) {
+		            if (item.isClicked()) {
 		            	ForegroundColorSpan fcs = new ForegroundColorSpan(res.getColor(R.color.purple));
 		            	titleSS.setSpan(fcs, 0, titleLen, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
 		            } else {
@@ -339,33 +349,35 @@ public final class RedditIsFun extends ListActivity {
 	            builder.append(domainSS);
 	            titleView.setText(builder);
 	            
-	            votesView.setText(item.getScore());
-	            numCommentsView.setText(item.getNumComments()+" comments");
+	            votesView.setText("" + item.getScore());
+	            numCommentsView.setText(Util.showNumComments(item.getNum_comments()));
 	            if (mSettings.isFrontpage) {
 	            	subredditView.setVisibility(View.VISIBLE);
 	            	subredditView.setText(item.getSubreddit());
 	            } else {
 	            	subredditView.setVisibility(View.GONE);
 	            }
-	//            submitterView.setText(item.getAuthor());
-	            // TODO: convert submission time to a displayable time
-	//            Date submissionTimeDate = new Date((long) (Double.parseDouble(item.getCreated()) / 1000));
-	//            submissionTimeView.setText("5 hours ago");
-	            
+
+                if(item.isOver_18()){
+                    nsfwView.setVisibility(View.VISIBLE);
+                } else {
+                    nsfwView.setVisibility(View.GONE);
+                }
+                
 	            // Set the up and down arrow colors based on whether user likes
 	            if (mSettings.loggedIn) {
-	            	if (Constants.TRUE_STRING.equals(item.getLikes())) {
-	            		voteUpView.setImageResource(R.drawable.vote_up_red);
-	            		voteDownView.setImageResource(R.drawable.vote_down_gray);
-	            		votesView.setTextColor(res.getColor(R.color.arrow_red));
-	            	} else if (Constants.FALSE_STRING.equals(item.getLikes())) {
-	            		voteUpView.setImageResource(R.drawable.vote_up_gray);
-	            		voteDownView.setImageResource(R.drawable.vote_down_blue);
-	            		votesView.setTextColor(res.getColor(R.color.arrow_blue));
-	            	} else {
+	            	if (item.getLikes() == null) {
 	            		voteUpView.setImageResource(R.drawable.vote_up_gray);
 	            		voteDownView.setImageResource(R.drawable.vote_down_gray);
 	            		votesView.setTextColor(res.getColor(R.color.gray));
+	            	} else if (item.getLikes() == true) {
+	            		voteUpView.setImageResource(R.drawable.vote_up_red);
+	            		voteDownView.setImageResource(R.drawable.vote_down_gray);
+	            		votesView.setTextColor(res.getColor(R.color.arrow_red));
+	            	} else {
+	            		voteUpView.setImageResource(R.drawable.vote_up_gray);
+	            		voteDownView.setImageResource(R.drawable.vote_down_blue);
+	            		votesView.setTextColor(res.getColor(R.color.arrow_blue));
 	            	}
 	            } else {
 	        		voteUpView.setImageResource(R.drawable.vote_up_gray);
@@ -373,62 +385,53 @@ public final class RedditIsFun extends ListActivity {
 	        		votesView.setTextColor(res.getColor(R.color.gray));
 	            }
 	            
-	            // TODO?: Thumbnail
-	//            view.getThumbnail().
-	
-	            // TODO: If thumbnail, download it and create ImageView
-	            // Some thumbnails may be absolute paths instead of URLs:
-	            // "/static/noimage.png"
-	            
-	            // Set the proper icon (star or presence or nothing)
-	//            ImageView presenceView = cache.presenceView;
-	//            if ((mMode & MODE_MASK_NO_PRESENCE) == 0) {
-	//                int serverStatus;
-	//                if (!cursor.isNull(SERVER_STATUS_COLUMN_INDEX)) {
-	//                    serverStatus = cursor.getInt(SERVER_STATUS_COLUMN_INDEX);
-	//                    presenceView.setImageResource(
-	//                            Presence.getPresenceIconResourceId(serverStatus));
-	//                    presenceView.setVisibility(View.VISIBLE);
-	//                } else {
-	//                    presenceView.setVisibility(View.GONE);
-	//                }
-	//            } else {
-	//                presenceView.setVisibility(View.GONE);
-	//            }
-	//
-	//            // Set the photo, if requested
-	//            if (mDisplayPhotos) {
-	//                Bitmap photo = null;
-	//
-	//                // Look for the cached bitmap
-	//                int pos = cursor.getPosition();
-	//                SoftReference<Bitmap> ref = mBitmapCache.get(pos);
-	//                if (ref != null) {
-	//                    photo = ref.get();
-	//                }
-	//
-	//                if (photo == null) {
-	//                    // Bitmap cache miss, decode it from the cursor
-	//                    if (!cursor.isNull(PHOTO_COLUMN_INDEX)) {
-	//                        try {
-	//                            byte[] photoData = cursor.getBlob(PHOTO_COLUMN_INDEX);
-	//                            photo = BitmapFactory.decodeByteArray(photoData, 0,
-	//                                    photoData.length);
-	//                            mBitmapCache.put(pos, new SoftReference<Bitmap>(photo));
-	//                        } catch (OutOfMemoryError e) {
-	//                            // Not enough memory for the photo, use the default one instead
-	//                            photo = null;
-	//                        }
-	//                    }
-	//                }
-	//
-	//                // Bind the photo, or use the fallback no photo resource
-	//                if (photo != null) {
-	//                    cache.photoView.setImageBitmap(photo);
-	//                } else {
-	//                    cache.photoView.setImageResource(R.drawable.ic_contact_list_picture);
-	//                }
-	//            }
+	            // Thumbnails open links
+	            if (thumbnailView != null) {
+	            	if (mSettings.loadThumbnails) {
+	            		dividerView.setVisibility(View.VISIBLE);
+	            		thumbnailView.setVisibility(View.VISIBLE);
+	            		indeterminateProgressBar.setVisibility(View.GONE);
+	            		
+		            	final String url = item.getUrl();
+		            	final String jumpToId = item.getId();
+		            	thumbnailView.setOnClickListener(new OnClickListener() {
+		            		public void onClick(View v) {
+		            			mJumpToThreadId = jumpToId;
+		            			Common.launchBrowser(url, RedditIsFun.this);
+		            		}
+		            	});
+		            	indeterminateProgressBar.setOnClickListener(new OnClickListener() {
+		            		public void onClick(View v) {
+		            			mJumpToThreadId = jumpToId;
+		            			Common.launchBrowser(url, RedditIsFun.this);
+		            		}
+		            	});
+		            	
+		            	// Fill in the thumbnail using a Thread. Note that thumbnail URL can be absolute path.
+		            	if (item.getThumbnail() != null && !Constants.EMPTY_STRING.equals(item.getThumbnail())) {
+		            		drawableManager.fetchDrawableOnThread(Util.absolutePathToURL(item.getThumbnail()),
+		            				thumbnailView, indeterminateProgressBar, RedditIsFun.this);
+		            	} else {
+		            		indeterminateProgressBar.setVisibility(View.GONE);
+		            		thumbnailView.setVisibility(View.VISIBLE);
+		            		thumbnailView.setImageResource(R.drawable.go_arrow);
+		            	}
+		            	
+		            	// Set thumbnail background based on current theme
+		            	if (mSettings.theme == R.style.Reddit_Light) {
+		            		thumbnailView.setBackgroundResource(R.drawable.thumbnail_background_light);
+		            		indeterminateProgressBar.setBackgroundResource(R.drawable.thumbnail_background_light);
+		            	} else {
+		            		thumbnailView.setBackgroundResource(R.drawable.thumbnail_background_dark);
+		            		indeterminateProgressBar.setBackgroundResource(R.drawable.thumbnail_background_dark);
+		            	}
+	            	} else {
+	            		// if thumbnails disabled, hide thumbnail icon
+	            		dividerView.setVisibility(View.GONE);
+	            		thumbnailView.setVisibility(View.GONE);
+	            		indeterminateProgressBar.setVisibility(View.GONE);
+	            	}
+	            }
             } else {
             	// The "25 more" list item
             	if (convertView == null)
@@ -476,15 +479,16 @@ public final class RedditIsFun extends ListActivity {
      */
     @Override
     protected void onListItemClick(ListView l, View v, int position, long id) {
-        ThreadInfo item = mThreadsAdapter.getItem(position);
+        ThingInfo item = mThreadsAdapter.getItem(position);
         
-        // if mThreadsAdapter.getCount() - 1 contains the "next 25, prev 25" buttons,
+    	// Mark the thread as selected
+    	mVoteTargetThingInfo = item;
+    	mJumpToThreadId = item.getId();
+
+    	// if mThreadsAdapter.getCount() - 1 contains the "next 25, prev 25" buttons,
         // or if there are fewer than 25 threads...
         if (position < mThreadsAdapter.getCount() - 1 || mThreadsAdapter.getCount() < Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT + 1) {
-	        // Mark the thread as selected
-	        mVoteTargetThreadInfo = item;
-	        mJumpToThreadId = item.getId();
-	        showDialog(Constants.DIALOG_THING_CLICK);
+            showDialog(Constants.DIALOG_THING_CLICK);
         } else {
         	// 25 more. Use buttons.
         }
@@ -495,21 +499,44 @@ public final class RedditIsFun extends ListActivity {
      * @param threadsAdapter A ThreadsListAdapter to use. Pass in null if you want a new empty one created.
      */
     void resetUI(ThreadsListAdapter threadsAdapter) {
-    	if (threadsAdapter == null) {
-            // Reset the list to be empty.
-	    	mThreadsList = new ArrayList<ThreadInfo>();
-			mThreadsAdapter = new ThreadsListAdapter(this, mThreadsList);
-    	} else {
-    		mThreadsAdapter = threadsAdapter;
-    	}
-	    setListAdapter(mThreadsAdapter);
-	    mThreadsAdapter.notifyDataSetChanged();  // Just in case
+    	setContentView(R.layout.threads_list_content);
+    	synchronized (THREAD_ADAPTER_LOCK) {
+	    	if (threadsAdapter == null) {
+	            // Reset the list to be empty.
+		    	mThreadsList = new ArrayList<ThingInfo>();
+				mThreadsAdapter = new ThreadsListAdapter(this, mThreadsList);
+	    	} else {
+	    		mThreadsAdapter = threadsAdapter;
+	    	}
+		    setListAdapter(mThreadsAdapter);
+		    mThreadsAdapter.mIsLoading = false;
+		    mThreadsAdapter.notifyDataSetChanged();  // Just in case
+		}
 	    Common.updateListDrawables(this, mSettings.theme);
     }
     
-    void resetUrlToGetHere() {
-    	mUrlToGetHere = null;
-    	mUrlToGetHereChanged = true;
+    private void enableLoadingScreen() {
+    	if (mSettings.theme == R.style.Reddit_Light) {
+    		setContentView(R.layout.loading_light);
+    	} else {
+    		setContentView(R.layout.loading_dark);
+    	}
+    	synchronized (THREAD_ADAPTER_LOCK) {
+	    	if (mThreadsAdapter != null)
+	    		mThreadsAdapter.mIsLoading = true;
+    	}
+    	getWindow().setFeatureInt(Window.FEATURE_PROGRESS, 0);
+    }
+    
+    private void disableLoadingScreen() {
+    	resetUI(mThreadsAdapter);
+    	getWindow().setFeatureInt(Window.FEATURE_PROGRESS, 10000);
+    }
+    
+    /**
+     * Reset mCount, which is actually an index used by reddit.com for the next25/prev25
+     */
+    void resetCount() {
     	mCount = Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT;
     }
 
@@ -519,217 +546,200 @@ public final class RedditIsFun extends ListActivity {
      * @param subreddit The name of a subreddit ("reddit.com", "gaming", etc.)
      *        If the number of elements in subreddit is >= 2, treat 2nd element as "after" 
      */
-    private class DownloadThreadsTask extends AsyncTask<CharSequence, Integer, Boolean> {
+    private class DownloadThreadsTask extends AsyncTask<CharSequence, Long, Boolean>
+    		implements PropertyChangeListener {
     	
-    	private ArrayList<ThreadInfo> mThreadInfos = new ArrayList<ThreadInfo>();
+    	private ArrayList<ThingInfo> mThingInfos = new ArrayList<ThingInfo>();
+    	private CharSequence _mSubreddit;
     	private String _mUserError = "Error retrieving subreddit info.";
+    	// Progress bar
+    	private long _mContentLength = 0;
+    	private CharSequence _mLastAfter = null;
+    	private CharSequence _mLastBefore = null;
+    	
+    	public DownloadThreadsTask(CharSequence subreddit) {
+    		_mSubreddit = subreddit;
+    	}
     	
     	public Boolean doInBackground(CharSequence... subreddit) {
     		HttpEntity entity = null;
+    		boolean isAfter = false;
+    		boolean isBefore = false;
 	    	try {
 	    		String url;
 	    		StringBuilder sb;
 	    		// If refreshing or something, use the previously used URL to get the threads.
 	    		// Picking a new subreddit will erase the saved URL, getting rid of after= and before=.
-	    		// subreddit.length != 1 means you are going Next or Prev, which creates new URL.
-	    		if (subreddit.length == 1 && !mUrlToGetHereChanged && mUrlToGetHere != null) {
-	    			url = mUrlToGetHere.toString();
+	    		// subreddit.length != 0 means you are going Next or Prev, which creates new URL.
+    			if (Constants.FRONTPAGE_STRING.equals(_mSubreddit)) {
+	    			sb = new StringBuilder("http://www.reddit.com/").append(mSortByUrl)
+	    				.append(".json?").append(mSortByUrlExtra).append("&");
 	    		} else {
-		    		if (Constants.FRONTPAGE_STRING.equals(subreddit[0])) {
-		    			sb = new StringBuilder("http://www.reddit.com/").append(mSortByUrl)
-		    				.append(".json?").append(mSortByUrlExtra).append("&");
-		    		} else {
-		    			sb = new StringBuilder("http://www.reddit.com/r/")
-	            			.append(subreddit[0].toString().trim())
-	            			.append("/").append(mSortByUrl).append(".json?")
-	            			.append(mSortByUrlExtra).append("&");
-		    		}
-	    			// "before" always comes back null unless you provide correct "count"
-		    		if (subreddit.length == 2) {
-		    			// count: 25, 50, ...
-	    				sb = sb.append("count=").append(mCount)
-	    					.append("&after=").append(subreddit[1]).append("&");
-	    				mCount += Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT;
-		    		}
-		    		else if (subreddit.length == 3) {
-		    			// count: nothing, 26, 51, ...
-		    			sb = sb.append("count=").append(mCount + 1 - Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT)
-		    				.append("&before=").append(subreddit[2]).append("&");
-		    			mCount -= Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT;
-		    		}
-	
-		    		mUrlToGetHere = url = sb.toString();
-		    		mUrlToGetHereChanged = false;
+	    			sb = new StringBuilder("http://www.reddit.com/r/")
+            			.append(_mSubreddit.toString().trim())
+            			.append("/").append(mSortByUrl).append(".json?")
+            			.append(mSortByUrlExtra).append("&");
+	    		}
+    			// "before" always comes back null unless you provide correct "count"
+	    		if (subreddit.length == 1) {
+	    			// count: 25, 50, ...
+    				sb = sb.append("count=").append(mCount)
+    					.append("&after=").append(subreddit[0]).append("&");
+    				isAfter = true;
+	    		}
+	    		else if (subreddit.length == 2) {
+	    			// count: nothing, 26, 51, ...
+	    			sb = sb.append("count=").append(mCount + 1 - Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT)
+	    				.append("&before=").append(subreddit[1]).append("&");
+	    			isBefore = true;
 	    		}
 	    		
-    			HttpGet request = new HttpGet(url);
-            	HttpResponse response = mClient.execute(request);
-            	entity = response.getEntity();
-            	InputStream in = entity.getContent();
-                try {
-                	parseSubredditJSON(in);
-                	in.close();
-                	entity.consumeContent();
-                	mSettings.setSubreddit(subreddit[0]);
+	    		url = sb.toString();
+	
+	    		InputStream in = null;
+	    		boolean currentlyUsingCache = false;
+	    		
+	    		if (Constants.USE_CACHE) {
+	    			try {
+		    			if (CacheInfo.checkFreshSubredditCache(getApplicationContext())
+		    					&& url.equals(CacheInfo.getCachedSubredditUrl(getApplicationContext()))) {
+		    				in = openFileInput(Constants.FILENAME_SUBREDDIT_CACHE);
+		    				_mContentLength = getFileStreamPath(Constants.FILENAME_SUBREDDIT_CACHE).length();
+		    				currentlyUsingCache = true;
+		    				if (Constants.LOGGING) Log.d(TAG, "Using cached subreddit JSON, length=" + _mContentLength);
+		    			}
+	    			} catch (Exception cacheEx) {
+	    				if (Constants.LOGGING) Log.w(TAG, "skip cache because of: "+cacheEx.getMessage());
+	    			}
+	    		}
+	    		
+	    		// If we couldn't use the cache, then do HTTP request
+	    		if (!currentlyUsingCache) {
+		    		HttpGet request;
+	    			try {
+	    				request = new HttpGet(url);
+	    			} catch (IllegalArgumentException e) {
+	    				_mUserError = "Invalid subreddit.";
+	                	if (Constants.LOGGING) Log.e(TAG, "IllegalArgumentException:" + e.getMessage());
+	                	return false;
+	    			}
+	            	HttpResponse response = mClient.execute(request);
+	
+	            	// Read the header to get Content-Length since entity.getContentLength() returns -1
+	            	Header contentLengthHeader = response.getFirstHeader("Content-Length");
+	            	_mContentLength = Long.valueOf(contentLengthHeader.getValue());
+	            	if (Constants.LOGGING) Log.d(TAG, "Content length: "+_mContentLength);
+	
+	            	entity = response.getEntity();
+	            	in = entity.getContent();
+	            	
+	            	if (Constants.USE_CACHE) {
+	                	in = CacheInfo.writeThenRead(getApplicationContext(), in, Constants.FILENAME_SUBREDDIT_CACHE);
+	                	try {
+	                		CacheInfo.setCachedSubredditUrl(getApplicationContext(), url);
+	                	} catch (IOException e) {
+	                		if (Constants.LOGGING) Log.e(TAG, "error on setCachedSubreddit: " + e.getMessage());
+	                	}
+	            	}
+	    		}
+            	
+	    		ProgressInputStream pin = new ProgressInputStream(in, _mContentLength);
+            	pin.addPropertyChangeListener(this);
+            	
+            	try {
+                	parseSubredditJSON(pin);
+                	
+                	mSettings.setSubreddit(_mSubreddit);
+                	mLastCount = mCount;
+                	if (isAfter)
+                		mCount += Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT;
+                	else if (isBefore)
+                		mCount -= Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT;
+                	mLastAfter = _mLastAfter;
+                	mLastBefore = _mLastBefore;
+                	
                 	return true;
+                	
                 } catch (IllegalStateException e) {
                 	_mUserError = "Invalid subreddit.";
-                	if (Constants.LOGGING) Log.e(TAG, e.getMessage());
+                	if (Constants.LOGGING) Log.e(TAG, "IllegalStateException:" + e.getMessage());
                 } catch (Exception e) {
-                	if (Constants.LOGGING) Log.e(TAG, e.getMessage());
-                	if (entity != null) {
-                		try {
-                			entity.consumeContent();
-                		} catch (Exception e2) {
-                			// Ignore.
-                		}
-                	}
+                	if (Constants.LOGGING) Log.e(TAG, "Exception:" + e.getMessage());
+                } finally {
+                	pin.close();
+                	in.close();
                 }
-            } catch (IOException e) {
-            	if (Constants.LOGGING) Log.e(TAG, "failed:" + e.getMessage());
+            } catch (Exception e) {
+            	if (Constants.LOGGING) Log.e(TAG, "DownloadThreadsTask:" + e.getMessage());
+            } finally {
+        		if (entity != null) {
+        			try {
+        				entity.consumeContent();
+        			} catch (Exception e2) {
+        				if (Constants.LOGGING) Log.e(TAG, "entity.consumeContent():" + e2.getMessage());
+        			}
+        		}
             }
             return false;
 	    }
     	
-    	private void parseSubredditJSON(InputStream in) throws IOException,
-		    	JsonParseException, IllegalStateException {
-		
-			JsonParser jp = jsonFactory.createJsonParser(in);
-			
-			if (jp.nextToken() == JsonToken.VALUE_NULL)
-				return;
-			
-			// --- Validate initial stuff, skip to the JSON List of threads ---
-			String genericListingError = "Not a subreddit listing";
-		//	if (JsonToken.START_OBJECT != jp.nextToken()) // starts with "{"
-		//		throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			if (!Constants.JSON_KIND.equals(jp.getCurrentName()))
-				throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			if (!Constants.JSON_LISTING.equals(jp.getText()))
-				throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			if (!Constants.JSON_DATA.equals(jp.getCurrentName()))
-				throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			if (JsonToken.START_OBJECT != jp.getCurrentToken())
-				throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			// Save the modhash
-			if (!Constants.JSON_MODHASH.equals(jp.getCurrentName()))
-				throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			if (Constants.EMPTY_STRING.equals(jp.getText()))
-				mSettings.setModhash(null);
-			else
-				mSettings.setModhash(jp.getText());
-			jp.nextToken();
-			if (!Constants.JSON_CHILDREN.equals(jp.getCurrentName()))
-				throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			if (jp.getCurrentToken() != JsonToken.START_ARRAY)
-				throw new IllegalStateException(genericListingError);
-			
-			// --- Main parsing ---
-			int progressIndex = 0;
-			while (jp.nextToken() != JsonToken.END_ARRAY) {
-				if (jp.getCurrentToken() != JsonToken.START_OBJECT)
-					throw new IllegalStateException("Unexpected non-JSON-object in the children array");
-			
-				// Process JSON representing one thread
-				ThreadInfo ti = new ThreadInfo();
-				while (jp.nextToken() != JsonToken.END_OBJECT) {
-					String fieldname = jp.getCurrentName();
-					jp.nextToken(); // move to value, or START_OBJECT/START_ARRAY
-				
-					if (Constants.JSON_KIND.equals(fieldname)) {
-						if (!Constants.THREAD_KIND.equals(jp.getText())) {
-							// Skip this JSON Object since it doesn't represent a thread.
-							// May encounter nested objects too.
-							int nested = 0;
-							for (;;) {
-								jp.nextToken();
-								if (jp.getCurrentToken() == JsonToken.END_OBJECT && nested == 0)
-									break;
-								if (jp.getCurrentToken() == JsonToken.START_OBJECT)
-									nested++;
-								else if (jp.getCurrentToken() == JsonToken.END_OBJECT)
-									nested--;
-							}
-							break;  // Go on to the next thread (JSON Object) in the JSON Array.
-						}
-						ti.put(Constants.JSON_KIND, Constants.THREAD_KIND);
-					} else if (Constants.JSON_DATA.equals(fieldname)) { // contains an object
-						while (jp.nextToken() != JsonToken.END_OBJECT) {
-							String namefield = jp.getCurrentName();
-							jp.nextToken(); // move to value
-							// Should validate each field but I'm lazy
-							// FIXME: Handle sub-objects ("media" and "media_embed"). For now, ignore.
-							if (jp.getCurrentToken() == JsonToken.START_OBJECT) {
-								int nested = 0;
-								for (;;) {
-									jp.nextToken();
-									if (jp.getCurrentToken() == JsonToken.END_OBJECT && nested == 0)
-										break;
-									if (jp.getCurrentToken() == JsonToken.START_OBJECT)
-										nested++;
-									else if (jp.getCurrentToken() == JsonToken.END_OBJECT)
-										nested--;
-								}
-							} else {
-								ti.put(namefield, StringEscapeUtils.unescapeHtml(jp.getText().replaceAll("\r", "")));
-							}
-						}
-					} else {
-						throw new IllegalStateException("Unrecognized field '"+fieldname+"'!");
-					}
-				}
-				mThreadInfos.add(ti);
-				publishProgress(progressIndex++);
-			}
-			// Get the "after"
-			jp.nextToken();
-			if (!Constants.JSON_AFTER.equals(jp.getCurrentName()))
-				throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			mAfter = jp.getText();
-			if (Constants.NULL_STRING.equals(mAfter))
-				mAfter = null;
-			// Get the "before"
-			jp.nextToken();
-			if (!Constants.JSON_BEFORE.equals(jp.getCurrentName()))
-				throw new IllegalStateException(genericListingError);
-			jp.nextToken();
-			mBefore = jp.getText();
-			if (Constants.NULL_STRING.equals(mBefore))
-				mBefore = null;
+    	private void parseSubredditJSON(InputStream in)
+    			throws IOException, JsonParseException, IllegalStateException {
+    		
+    		String genericListingError = "Not a subreddit listing";
+    		try {
+    			Listing listing = om.readValue(in, Listing.class);
+    			
+    			if (!Constants.JSON_LISTING.equals(listing.getKind()))
+    				throw new IllegalStateException(genericListingError);
+    			// Save the modhash, after, and before
+    			ListingData data = listing.getData();
+    			if (Constants.EMPTY_STRING.equals(data.getModhash()))
+    				mSettings.setModhash(null);
+    			else
+    				mSettings.setModhash(data.getModhash());
+    			
+    			_mLastAfter = mAfter;
+    			_mLastBefore = mBefore;
+    			mAfter = data.getAfter();
+    			mBefore = data.getBefore();
+    			
+    			// Go through the children and get the ThingInfos
+    			for (ThingListing tiContainer : data.getChildren()) {
+    				// Only add entries that are threads. kind="t3"
+    				if (Constants.THREAD_KIND.equals(tiContainer.getKind())) {
+    					ThingInfo ti = tiContainer.getData();
+    					
+    					// Additional formatting on the threads
+    					ti.setTitle(StringEscapeUtils.unescapeHtml(ti.getTitle().trim()
+    							.replaceAll("\r", "").replaceAll("\n ", " ").replaceAll(" \n", " ").replaceAll("\n", " ")));
+    					
+    					mThingInfos.add(tiContainer.getData());
+    				}
+    			}
+    		} catch (Exception ex) {
+    			if (Constants.LOGGING) Log.e(TAG, "parseSubredditJSON:" + ex.getMessage());
+    		}
     	}
     	
     	@Override
     	public void onPreExecute() {
     		synchronized (mCurrentDownloadThreadsTaskLock) {
-	    		if (mCurrentDownloadThreadsTask != null)
-	    			mCurrentDownloadThreadsTask.cancel(true);
-	    		mCurrentDownloadThreadsTask = this;
+	    		if (mCurrentDownloadThreadsTask != null) {
+	    			this.cancel(true);
+	    			return;
+	    		}
+    			mCurrentDownloadThreadsTask = this;
     		}
     		resetUI(null);
-    		mThreadsAdapter.mIsLoading = true;
-    		// In case a ReadCacheTask tries to preempt this DownloadThreadsTask
-    		mShouldUseThreadsCache = false;
+    		enableLoadingScreen();
 			
-	    	if ("jailbait".equals(mSettings.subreddit.toString())) {
-	    		Toast lodToast = Toast.makeText(RedditIsFun.this, "", Toast.LENGTH_LONG);
-	    		View lodView = ((LayoutInflater) getSystemService(Context.LAYOUT_INFLATER_SERVICE))
-	    			.inflate(R.layout.look_of_disapproval_view, null);
-	    		lodToast.setView(lodView);
-	    		lodToast.show();
-	    	}
-	    	showDialog(Constants.DIALOG_LOADING_THREADS_LIST);
-	    	if (Constants.FRONTPAGE_STRING.equals(mSettings.subreddit))
+	    	getWindow().setFeatureInt(Window.FEATURE_PROGRESS, 0);
+	    	
+	    	if (Constants.FRONTPAGE_STRING.equals(_mSubreddit))
 	    		setTitle("reddit.com: what's new online!");
 	    	else
-	    		setTitle("/r/"+mSettings.subreddit.toString().trim());
+	    		setTitle("/r/"+_mSubreddit.toString().trim());
     	}
     	
     	@Override
@@ -737,17 +747,18 @@ public final class RedditIsFun extends ListActivity {
     		synchronized (mCurrentDownloadThreadsTaskLock) {
     			mCurrentDownloadThreadsTask = null;
     		}
-    		dismissDialog(Constants.DIALOG_LOADING_THREADS_LIST);
+    		disableLoadingScreen();
+
     		if (success) {
-	    		for (ThreadInfo ti : mThreadInfos)
-	        		mThreadsList.add(ti);
-	    		// "25 more" button.
-	    		if (mThreadsList.size() >= Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT)
-	    			mThreadsList.add(new ThreadInfo());
-	    		// Remember this time for caching purposes
-	    		mLastRefreshTime = System.currentTimeMillis();
-	    		mShouldUseThreadsCache = true;
-	    		resetUI(new ThreadsListAdapter(RedditIsFun.this, mThreadsList));
+    			synchronized (THREAD_ADAPTER_LOCK) {
+		    		for (ThingInfo ti : mThingInfos)
+		        		mThreadsList.add(ti);
+		    		// "25 more" button.
+		    		if (mThreadsList.size() >= Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT)
+		    			mThreadsList.add(new ThingInfo());
+		    		drawableManager = new DrawableManager();  // clear thumbnails
+		    		mThreadsAdapter.notifyDataSetChanged();
+    			}
 	    		// Point the list to last thread user was looking at, if any
 	    		jumpToThread();
     		} else {
@@ -757,8 +768,13 @@ public final class RedditIsFun extends ListActivity {
     	}
     	
     	@Override
-    	public void onProgressUpdate(Integer... progress) {
-    		mLoadingThreadsProgress.setProgress(progress[0]);
+    	public void onProgressUpdate(Long... progress) {
+    		// 0-9999 is ok, 10000 means it's finished
+    		getWindow().setFeatureInt(Window.FEATURE_PROGRESS, progress[0].intValue() * 9999 / (int) _mContentLength);
+    	}
+    	
+    	public void propertyChange(PropertyChangeEvent event) {
+    		publishProgress((Long) event.getNewValue());
     	}
     }
     
@@ -773,7 +789,7 @@ public final class RedditIsFun extends ListActivity {
     	
     	@Override
     	public String doInBackground(Void... v) {
-    		return Common.doLogin(mUsername, mPassword, mClient, mSettings);
+    		return Common.doLogin(mUsername, mPassword, mSettings, mClient, getApplicationContext());
         }
     	
     	@Override
@@ -789,7 +805,7 @@ public final class RedditIsFun extends ListActivity {
     			// Check mail
     			new Common.PeekEnvelopeTask(getApplicationContext(), mClient, mSettings.mailNotificationStyle).execute();
     			// Refresh the threads list
-    			new DownloadThreadsTask().execute(mSettings.subreddit);
+    			new DownloadThreadsTask(mSettings.subreddit).execute();
         	} else {
             	Common.showErrorToast(errorMessage, Toast.LENGTH_LONG, RedditIsFun.this);
     		}
@@ -803,23 +819,22 @@ public final class RedditIsFun extends ListActivity {
     	private CharSequence _mThingFullname, _mSubreddit;
     	private int _mDirection;
     	private String _mUserError = "Error voting.";
-    	private ThreadInfo _mTargetThreadInfo;
+    	private ThingInfo _mTargetThingInfo;
     	
     	// Save the previous arrow and score in case we need to revert
     	private int _mPreviousScore;
-    	private String _mPreviousLikes;
+    	private Boolean _mPreviousLikes;
     	
     	VoteTask(CharSequence thingFullname, int direction, CharSequence subreddit) {
     		_mThingFullname = thingFullname;
     		_mDirection = direction;
     		_mSubreddit = subreddit;
     		// Copy these because they can change while voting thread is running
-    		_mTargetThreadInfo = mVoteTargetThreadInfo;
+    		_mTargetThingInfo = mVoteTargetThingInfo;
     	}
     	
     	@Override
     	public Boolean doInBackground(Void... v) {
-        	String status = "";
         	HttpEntity entity = null;
         	
         	if (!mSettings.loggedIn) {
@@ -832,7 +847,7 @@ public final class RedditIsFun extends ListActivity {
         		CharSequence modhash = Common.doUpdateModhash(mClient);
         		if (modhash == null) {
         			// doUpdateModhash should have given an error about credentials
-        			Common.doLogout(mSettings, mClient);
+        			Common.doLogout(mSettings, mClient, getApplicationContext());
         			if (Constants.LOGGING) Log.e(TAG, "Vote failed because doUpdateModhash() failed");
         			return false;
         		}
@@ -856,44 +871,25 @@ public final class RedditIsFun extends ListActivity {
     	        
                 // Perform the HTTP POST request
     	    	HttpResponse response = mClient.execute(httppost);
-    	    	status = response.getStatusLine().toString();
-            	if (!status.contains("OK")) {
-            		_mUserError = "HTTP error when voting. Try again.";
-            		throw new HttpException(status);
-            	}
-            	
-            	entity = response.getEntity();
-
-            	BufferedReader in = new BufferedReader(new InputStreamReader(entity.getContent()));
-            	String line = in.readLine();
-            	in.close();
-            	if (line == null || Constants.EMPTY_STRING.equals(line)) {
-            		_mUserError = "Connection error when voting. Try again.";
-            		throw new HttpException("No content returned from vote POST");
-            	}
-            	if (line.contains("WRONG_PASSWORD")) {
-            		_mUserError = "Wrong password.";
-            		throw new Exception("Wrong password.");
-            	}
-            	if (line.contains("USER_REQUIRED")) {
-            		// The modhash probably expired
-            		throw new Exception("User required. Huh?");
-            	}
-            	
-            	if (Constants.LOGGING) Common.logDLong(TAG, line);
-            	
-            	entity.consumeContent();
+    	    	entity = response.getEntity();
+    	    	
+    	    	String error = Common.checkResponseErrors(response, entity);
+    	    	if (error != null)
+    	    		throw new Exception(error);
+    	    	
             	return true;
             	
         	} catch (Exception e) {
+        		if (Constants.LOGGING) Log.e(TAG, "VoteTask:" + e.getMessage());
+        		_mUserError = e.getMessage();
+        	} finally {
         		if (entity != null) {
         			try {
         				entity.consumeContent();
         			} catch (Exception e2) {
-        				if (Constants.LOGGING) Log.e(TAG, e2.getMessage());
+        				if (Constants.LOGGING) Log.e(TAG, "entity.consumeContent:" + e2.getMessage());
         			}
         		}
-        		if (Constants.LOGGING) Log.e(TAG, e.getMessage());
         	}
         	return false;
         }
@@ -909,66 +905,57 @@ public final class RedditIsFun extends ListActivity {
         		if (Constants.LOGGING) Log.e(TAG, "WTF: _mDirection = " + _mDirection);
         		throw new RuntimeException("How the hell did you vote something besides -1, 0, or 1?");
         	}
-        	String newScore;
-        	String newLikes;
-        	_mPreviousScore = Integer.valueOf(_mTargetThreadInfo.getScore());
-        	_mPreviousLikes = _mTargetThreadInfo.getLikes();
-        	if (Constants.TRUE_STRING.equals(_mPreviousLikes)) {
-        		if (_mDirection == 0) {
-        			newScore = String.valueOf(_mPreviousScore - 1);
-        			newLikes = Constants.NULL_STRING;
+        	int newScore;
+        	Boolean newLikes;
+        	_mPreviousScore = Integer.valueOf(_mTargetThingInfo.getScore());
+        	_mPreviousLikes = _mTargetThingInfo.getLikes();
+        	if (_mPreviousLikes == null) {
+        		if (_mDirection == 1) {
+        			newScore = _mPreviousScore + 1;
+        			newLikes = true;
         		} else if (_mDirection == -1) {
-        			newScore = String.valueOf(_mPreviousScore - 2);
-        			newLikes = Constants.FALSE_STRING;
+        			newScore = _mPreviousScore - 1;
+        			newLikes = false;
         		} else {
         			cancel(true);
         			return;
         		}
-        	} else if (Constants.FALSE_STRING.equals(_mPreviousLikes)) {
-        		if (_mDirection == 1) {
-        			newScore = String.valueOf(_mPreviousScore + 2);
-        			newLikes = Constants.TRUE_STRING;
-        		} else if (_mDirection == 0) {
-        			newScore = String.valueOf(_mPreviousScore + 1);
-        			newLikes = Constants.NULL_STRING;
+        	} else if (_mPreviousLikes == true) {
+        		if (_mDirection == 0) {
+        			newScore = _mPreviousScore - 1;
+        			newLikes = null;
+        		} else if (_mDirection == -1) {
+        			newScore = _mPreviousScore - 2;
+        			newLikes = false;
         		} else {
         			cancel(true);
         			return;
         		}
         	} else {
         		if (_mDirection == 1) {
-        			newScore = String.valueOf(_mPreviousScore + 1);
-        			newLikes = Constants.TRUE_STRING;
-        		} else if (_mDirection == -1) {
-        			newScore = String.valueOf(_mPreviousScore - 1);
-        			newLikes = Constants.FALSE_STRING;
+        			newScore = _mPreviousScore + 2;
+        			newLikes = true;
+        		} else if (_mDirection == 0) {
+        			newScore = _mPreviousScore + 1;
+        			newLikes = null;
         		} else {
         			cancel(true);
         			return;
         		}
         	}
-    		_mTargetThreadInfo.setLikes(newLikes);
-    		_mTargetThreadInfo.setScore(newScore);
+    		_mTargetThingInfo.setLikes(newLikes);
+    		_mTargetThingInfo.setScore(newScore);
     		mThreadsAdapter.notifyDataSetChanged();
     	}
     	
     	@Override
     	public void onPostExecute(Boolean success) {
-    		if (!success) {
-    			// Vote failed. Undo the arrow and score.
-            	int oldImageResourceUp, oldImageResourceDown;
-        		if (Constants.TRUE_STRING.equals(_mPreviousLikes)) {
-            		oldImageResourceUp = R.drawable.vote_up_red;
-            		oldImageResourceDown = R.drawable.vote_down_gray;
-            	} else if (Constants.FALSE_STRING.equals(_mPreviousLikes)) {
-            		oldImageResourceUp = R.drawable.vote_up_gray;
-            		oldImageResourceDown = R.drawable.vote_down_blue;
-            	} else {
-            		oldImageResourceUp = R.drawable.vote_up_gray;
-            		oldImageResourceDown = R.drawable.vote_down_gray;
-            	}
-        		_mTargetThreadInfo.setLikes(_mPreviousLikes);
-        		_mTargetThreadInfo.setScore(String.valueOf(_mPreviousScore));
+    		if (success) {
+    			CacheInfo.invalidateCachedSubreddit(getApplicationContext());
+    		} else {
+    			// Vote failed. Undo the score.
+            	_mTargetThingInfo.setLikes(_mPreviousLikes);
+        		_mTargetThingInfo.setScore(_mPreviousScore);
         		mThreadsAdapter.notifyDataSetChanged();
         		
     			Common.showErrorToast(_mUserError, Toast.LENGTH_LONG, RedditIsFun.this);
@@ -995,22 +982,22 @@ public final class RedditIsFun extends ListActivity {
     	
     	AdapterView.AdapterContextMenuInfo info;
     	info = (AdapterView.AdapterContextMenuInfo) menuInfo;
-    	ThreadInfo _item = mThreadsAdapter.getItem(info.position);
+
+    	ThingInfo _item = mThreadsAdapter.getItem(info.position);
     	
-    	mVoteTargetThreadInfo = _item;
+    	mVoteTargetThingInfo = _item;
     	
     	menu.add(0, Constants.OPEN_IN_BROWSER_CONTEXT_ITEM, 0, "Open in browser");
     	menu.add(0, Constants.SHARE_CONTEXT_ITEM, 0, "Share");
     	menu.add(0, Constants.OPEN_COMMENTS_CONTEXT_ITEM, 0, "Comments");
     	
     	if(mSettings.loggedIn){
-    		if(_item.getSaved().equals("false")){
+    		if(!_item.isSaved()){
     			menu.add(0, Constants.SAVE_CONTEXT_ITEM, 0, "Save");
     		} else {
     			menu.add(0, Constants.UNSAVE_CONTEXT_ITEM, 0, "Unsave");
     		}
     	}
-    	
     }
     
     @Override
@@ -1018,14 +1005,15 @@ public final class RedditIsFun extends ListActivity {
     	AdapterView.AdapterContextMenuInfo info;
         info = (AdapterView.AdapterContextMenuInfo) item.getMenuInfo();
         
-        ThreadInfo _item = mThreadsAdapter.getItem(info.position);
+        ThingInfo _item = mThreadsAdapter.getItem(info.position);
         
         switch (item.getItemId()) {
 		case Constants.SHARE_CONTEXT_ITEM:
 			Intent intent = new Intent();
 			intent.setAction(Intent.ACTION_SEND);
 			intent.setType("text/plain");
-			intent.putExtra(Intent.EXTRA_TEXT, _item.getURL());
+
+			intent.putExtra(Intent.EXTRA_TEXT, _item.getUrl());
 			
 			try {
 				startActivity(Intent.createChooser(intent, "Share Link"));
@@ -1035,15 +1023,15 @@ public final class RedditIsFun extends ListActivity {
 			
 			return true;
 		case Constants.OPEN_IN_BROWSER_CONTEXT_ITEM:
-			Common.launchBrowser(_item.getURL(), this);
+			Common.launchBrowser(_item.getUrl(), this);
 			return true;
 			
 		case Constants.OPEN_COMMENTS_CONTEXT_ITEM:
 			Intent i = new Intent(getApplicationContext(), CommentsListActivity.class);
-			i.putExtra(ThreadInfo.SUBREDDIT, _item.getSubreddit());
-			i.putExtra(ThreadInfo.ID, _item.getId());
-			i.putExtra(ThreadInfo.TITLE, _item.getTitle());
-			i.putExtra(ThreadInfo.NUM_COMMENTS, Integer.valueOf(_item.getNumComments()));
+			i.putExtra(Constants.EXTRA_SUBREDDIT, _item.getSubreddit());
+			i.putExtra(Constants.EXTRA_ID, _item.getId());
+			i.putExtra(Constants.EXTRA_TITLE, _item.getTitle());
+			i.putExtra(Constants.EXTRA_NUM_COMMENTS, _item.getNum_comments());
 			startActivity(i);
 		
 		case Constants.SAVE_CONTEXT_ITEM:
@@ -1117,25 +1105,26 @@ public final class RedditIsFun extends ListActivity {
     		break;
     	case R.id.login_logout_menu_id:
         	if (mSettings.loggedIn) {
-        		Common.doLogout(mSettings, mClient);
+        		Common.doLogout(mSettings, mClient, getApplicationContext());
         		Toast.makeText(this, "You have been logged out.", Toast.LENGTH_SHORT).show();
-        		new DownloadThreadsTask().execute(mSettings.subreddit);
+        		new DownloadThreadsTask(mSettings.subreddit).execute();
         	} else {
         		showDialog(Constants.DIALOG_LOGIN);
         	}
     		break;
     	case R.id.refresh_menu_id:
     		// Reset some navigation
-    		mUrlToGetHere = null;
-    		mUrlToGetHereChanged = true;
     		mAfter = null;
     		mBefore = null;
-    		mCount = Constants.DEFAULT_THREAD_DOWNLOAD_LIMIT;
-    		new DownloadThreadsTask().execute(mSettings.subreddit);
+    		mLastAfter = null;
+    		mLastBefore = null;
+    		resetCount();
+    		CacheInfo.invalidateCachedSubreddit(getApplicationContext());
+    		new DownloadThreadsTask(mSettings.subreddit).execute();
     		break;
     	case R.id.submit_link_menu_id:
     		Intent submitLinkIntent = new Intent(getApplicationContext(), SubmitLinkActivity.class);
-    		submitLinkIntent.putExtra(ThreadInfo.SUBREDDIT, mSettings.subreddit);
+    		submitLinkIntent.putExtra(Constants.EXTRA_SUBREDDIT, mSettings.subreddit);
     		startActivityForResult(submitLinkIntent, Constants.ACTIVITY_SUBMIT_LINK);
     		break;
     	case R.id.sort_by_menu_id:
@@ -1189,42 +1178,13 @@ public final class RedditIsFun extends ListActivity {
     	
     	switch (id) {
     	case Constants.DIALOG_LOGIN:
-    		dialog = new Dialog(this);
-    		dialog.setContentView(R.layout.login_dialog);
-    		dialog.setTitle("Login to reddit.com");
-    		final EditText loginUsernameInput = (EditText) dialog.findViewById(R.id.login_username_input);
-    		final EditText loginPasswordInput = (EditText) dialog.findViewById(R.id.login_password_input);
-    		loginUsernameInput.setOnKeyListener(new OnKeyListener() {
-    			public boolean onKey(View v, int keyCode, KeyEvent event) {
-    		        if ((event.getAction() == KeyEvent.ACTION_DOWN)
-    		        		&& (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_TAB)) {
-    		        	loginPasswordInput.requestFocus();
-    		        	return true;
-    		        }
-    		        return false;
-    		    }
-    		});
-    		loginPasswordInput.setOnKeyListener(new OnKeyListener() {
-    			public boolean onKey(View v, int keyCode, KeyEvent event) {
-    		        if ((event.getAction() == KeyEvent.ACTION_DOWN) && (keyCode == KeyEvent.KEYCODE_ENTER)) {
-        				CharSequence user = loginUsernameInput.getText().toString().trim();
-        				CharSequence password = loginPasswordInput.getText();
-        				dismissDialog(Constants.DIALOG_LOGIN);
-    		        	new LoginTask(user, password).execute(); 
-    		        	return true;
-    		        }
-    		        return false;
-    		    }
-    		});
-    		final Button loginButton = (Button) dialog.findViewById(R.id.login_button);
-    		loginButton.setOnClickListener(new OnClickListener() {
-    			public void onClick(View v) {
-    				CharSequence user = loginUsernameInput.getText().toString().trim();
-    				CharSequence password = loginPasswordInput.getText();
-    				dismissDialog(Constants.DIALOG_LOGIN);
-    				new LoginTask(user, password).execute();
-    		    }
-    		});
+    		dialog = new LoginDialog(this, mSettings, false) {
+				@Override
+				public void onLoginChosen(CharSequence user, CharSequence password) {
+					dismissDialog(Constants.DIALOG_LOGIN);
+		        	new LoginTask(user, password).execute(); 
+				}
+			};
     		break;
     		
     	case Constants.DIALOG_THING_CLICK:
@@ -1243,8 +1203,8 @@ public final class RedditIsFun extends ListActivity {
     				if (Constants.ThreadsSort.SORT_BY_HOT.equals(itemCS)) {
     					mSortByUrl = Constants.ThreadsSort.SORT_BY_HOT_URL;
     					mSortByUrlExtra = Constants.EMPTY_STRING;
-    					resetUrlToGetHere();
-    					new DownloadThreadsTask().execute(mSettings.subreddit);
+    					resetCount();
+    					new DownloadThreadsTask(mSettings.subreddit).execute();
         			} else if (Constants.ThreadsSort.SORT_BY_NEW.equals(itemCS)) {
     					showDialog(Constants.DIALOG_SORT_BY_NEW);
     				} else if (Constants.ThreadsSort.SORT_BY_CONTROVERSIAL.equals(itemCS)) {
@@ -1268,8 +1228,8 @@ public final class RedditIsFun extends ListActivity {
     					mSortByUrlExtra = Constants.ThreadsSort.SORT_BY_NEW_NEW_URL;
     				else if (Constants.ThreadsSort.SORT_BY_NEW_RISING.equals(itemCS))
     					mSortByUrlExtra = Constants.ThreadsSort.SORT_BY_NEW_RISING_URL;
-    				resetUrlToGetHere();
-    				new DownloadThreadsTask().execute(mSettings.subreddit);
+    				resetCount();
+    				new DownloadThreadsTask(mSettings.subreddit).execute();
     			}
     		});
     		dialog = builder.create();
@@ -1294,8 +1254,8 @@ public final class RedditIsFun extends ListActivity {
     					mSortByUrlExtra = Constants.ThreadsSort.SORT_BY_CONTROVERSIAL_YEAR_URL;
     				else if (Constants.ThreadsSort.SORT_BY_CONTROVERSIAL_ALL.equals(itemCS))
     					mSortByUrlExtra = Constants.ThreadsSort.SORT_BY_CONTROVERSIAL_ALL_URL;
-    				resetUrlToGetHere();
-    				new DownloadThreadsTask().execute(mSettings.subreddit);
+    				resetCount();
+    				new DownloadThreadsTask(mSettings.subreddit).execute();
     			}
     		});
     		dialog = builder.create();
@@ -1320,8 +1280,8 @@ public final class RedditIsFun extends ListActivity {
     					mSortByUrlExtra = Constants.ThreadsSort.SORT_BY_TOP_YEAR_URL;
     				else if (Constants.ThreadsSort.SORT_BY_TOP_ALL.equals(itemCS))
     					mSortByUrlExtra = Constants.ThreadsSort.SORT_BY_TOP_ALL_URL;
-    				resetUrlToGetHere();
-    				new DownloadThreadsTask().execute(mSettings.subreddit);
+    				resetCount();
+    				new DownloadThreadsTask(mSettings.subreddit).execute();
     			}
     		});
     		dialog = builder.create();
@@ -1333,28 +1293,6 @@ public final class RedditIsFun extends ListActivity {
     		pdialog.setMessage("Logging in...");
     		pdialog.setIndeterminate(true);
     		pdialog.setCancelable(false);
-    		dialog = pdialog;
-    		break;
-    	case Constants.DIALOG_LOADING_THREADS_LIST:
-    		mLoadingThreadsProgress = new AutoResetProgressDialog(this);
-    		mLoadingThreadsProgress.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
-    		mLoadingThreadsProgress.setMessage("Loading subreddit...");
-    		mLoadingThreadsProgress.setCancelable(true);
-    		dialog = mLoadingThreadsProgress;
-    		break;
-    	case Constants.DIALOG_LOADING_THREADS_CACHE:
-    		pdialog = new ProgressDialog(this);
-    		pdialog.setMessage("Loading cached subreddit...");
-    		pdialog.setIndeterminate(true);
-    		pdialog.setCancelable(true);
-    		dialog = pdialog;
-    		break;
-    	case Constants.DIALOG_LOADING_LOOK_OF_DISAPPROVAL:
-    		pdialog = new ProgressDialog(this);
-    		pdialog.setIndeterminate(true);
-    		pdialog.setCancelable(true);
-    		pdialog.requestWindowFeature(Window.FEATURE_INDETERMINATE_PROGRESS);
-    		pdialog.setFeatureDrawableResource(Window.FEATURE_INDETERMINATE_PROGRESS, R.drawable.look_of_disapproval);
     		dialog = pdialog;
     		break;
     	
@@ -1380,7 +1318,7 @@ public final class RedditIsFun extends ListActivity {
     		break;
     		
     	case Constants.DIALOG_THING_CLICK:
-    		if (mVoteTargetThreadInfo == null)
+    		if (mVoteTargetThingInfo == null)
     			break;
     		final CheckBox voteUpButton = (CheckBox) dialog.findViewById(R.id.vote_up_button);
     		final CheckBox voteDownButton = (CheckBox) dialog.findViewById(R.id.vote_down_button);
@@ -1391,13 +1329,13 @@ public final class RedditIsFun extends ListActivity {
     		final Button linkButton = (Button) dialog.findViewById(R.id.thread_link_button);
     		final Button commentsButton = (Button) dialog.findViewById(R.id.thread_comments_button);
     		
-    		titleView.setText(mVoteTargetThreadInfo.getTitle().replaceAll("\n ", " ").replaceAll(" \n", " ").replaceAll("\n", " "));
-    		urlView.setText(mVoteTargetThreadInfo.getURL());
-    		sb = new StringBuilder(Util.getTimeAgo(Double.valueOf(mVoteTargetThreadInfo.getCreatedUtc())))
-    			.append(" by ").append(mVoteTargetThreadInfo.getAuthor());
+    		titleView.setText(mVoteTargetThingInfo.getTitle());
+    		urlView.setText(mVoteTargetThingInfo.getUrl());
+    		sb = new StringBuilder(Util.getTimeAgo(mVoteTargetThingInfo.getCreated_utc()))
+    			.append(" by ").append(mVoteTargetThingInfo.getAuthor());
             // Show subreddit if user is currently looking at front page
     		if (mSettings.isFrontpage) {
-    			sb.append(" to ").append(mVoteTargetThreadInfo.getSubreddit());
+    			sb.append(" to ").append(mVoteTargetThingInfo.getSubreddit());
     		}
             submissionStuffView.setText(sb);
             
@@ -1407,18 +1345,18 @@ public final class RedditIsFun extends ListActivity {
     			voteUpButton.setVisibility(View.VISIBLE);
     			voteDownButton.setVisibility(View.VISIBLE);
     			// Set initial states of the vote buttons based on user's past actions
-	    		if (Constants.TRUE_STRING.equals(mVoteTargetThreadInfo.getLikes())) {
-	    			// User currenty likes it
-	    			voteUpButton.setChecked(true);
-	    			voteDownButton.setChecked(false);
-	    		} else if (Constants.FALSE_STRING.equals(mVoteTargetThreadInfo.getLikes())) {
-	    			// User currently dislikes it
-	    			voteUpButton.setChecked(false);
-	    			voteDownButton.setChecked(true);
-	    		} else {
+	    		if (mVoteTargetThingInfo.getLikes() == null) {
 	    			// User is currently neutral
 	    			voteUpButton.setChecked(false);
 	    			voteDownButton.setChecked(false);
+	    		} else if (mVoteTargetThingInfo.getLikes() == true) {
+	    			// User currenty likes it
+	    			voteUpButton.setChecked(true);
+	    			voteDownButton.setChecked(false);
+	    		} else {
+	    			// User currently dislikes it
+	    			voteUpButton.setChecked(false);
+	    			voteDownButton.setChecked(true);
 	    		}
 	    		voteUpButton.setOnCheckedChangeListener(voteUpOnCheckedChangeListener);
 	    		voteDownButton.setOnCheckedChangeListener(voteDownOnCheckedChangeListener);
@@ -1435,11 +1373,11 @@ public final class RedditIsFun extends ListActivity {
     		}
 
     		// "link" button behaves differently for regular links vs. self posts and links to comments pages (e.g., bestof)
-            if (("self.").toLowerCase().equals(mVoteTargetThreadInfo.getDomain().substring(0, 5).toLowerCase())) {
+            if (mVoteTargetThingInfo.isIs_self()) {
             	// It's a self post. Both buttons do the same thing.
             	linkButton.setEnabled(false);
             } else {
-            	final String url = mVoteTargetThreadInfo.getURL();
+            	final String url = mVoteTargetThingInfo.getUrl();
             	linkButton.setOnClickListener(new OnClickListener() {
     				public void onClick(View v) {
     					dismissDialog(Constants.DIALOG_THING_CLICK);
@@ -1455,23 +1393,18 @@ public final class RedditIsFun extends ListActivity {
     			public void onClick(View v) {
     				dismissDialog(Constants.DIALOG_THING_CLICK);
     				// Launch an Intent for CommentsListActivity
+    				CacheInfo.invalidateCachedThread(getApplicationContext());
     				Intent i = new Intent(getApplicationContext(), CommentsListActivity.class);
-    				i.putExtra(ThreadInfo.SUBREDDIT, mVoteTargetThreadInfo.getSubreddit());
-    				i.putExtra(ThreadInfo.ID, mVoteTargetThreadInfo.getId());
-    				i.putExtra(ThreadInfo.TITLE, mVoteTargetThreadInfo.getTitle());
-    				i.putExtra(ThreadInfo.NUM_COMMENTS, Integer.valueOf(mVoteTargetThreadInfo.getNumComments()));
+    				i.putExtra(Constants.EXTRA_SUBREDDIT, mVoteTargetThingInfo.getSubreddit());
+    				i.putExtra(Constants.EXTRA_ID, mVoteTargetThingInfo.getId());
+    				i.putExtra(Constants.EXTRA_TITLE, mVoteTargetThingInfo.getTitle());
+    				i.putExtra(Constants.EXTRA_NUM_COMMENTS, Integer.valueOf(mVoteTargetThingInfo.getNum_comments()));
     				startActivity(i);
     			}
     		});
     		
     		break;
-    		
-    	case Constants.DIALOG_LOADING_THREADS_LIST:
-    		// FIXME: if different number of threads in reddit.com settings (e.g., 100) it should display that as max instead,
-    		// since the JSON returns more than just 25 if that is the case.
-    		mLoadingThreadsProgress.setMax(mSettings.threadDownloadLimit);
-    		break;
-    		
+    	
 		default:
 			// No preparation based on app state is required.
 			break;
@@ -1480,21 +1413,21 @@ public final class RedditIsFun extends ListActivity {
     
     private final OnClickListener downloadAfterOnClickListener = new OnClickListener() {
 		public void onClick(View v) {
-			new DownloadThreadsTask().execute(mSettings.subreddit, mAfter);
+			new DownloadThreadsTask(mSettings.subreddit).execute(mAfter);
 		}
 	};
 	private final OnClickListener downloadBeforeOnClickListener = new OnClickListener() {
 		public void onClick(View v) {
-			new DownloadThreadsTask().execute(mSettings.subreddit, null, mBefore);
+			new DownloadThreadsTask(mSettings.subreddit).execute(null, mBefore);
 		}
 	};
 	private final CompoundButton.OnCheckedChangeListener voteUpOnCheckedChangeListener = new CompoundButton.OnCheckedChangeListener() {
     	public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
 	    	dismissDialog(Constants.DIALOG_THING_CLICK);
 			if (isChecked) {
-				new VoteTask(mVoteTargetThreadInfo.getName(), 1, mVoteTargetThreadInfo.getSubreddit()).execute();
+				new VoteTask(mVoteTargetThingInfo.getName(), 1, mVoteTargetThingInfo.getSubreddit()).execute();
 			} else {
-				new VoteTask(mVoteTargetThreadInfo.getName(), 0, mVoteTargetThreadInfo.getSubreddit()).execute();
+				new VoteTask(mVoteTargetThingInfo.getName(), 0, mVoteTargetThingInfo.getSubreddit()).execute();
 			}
 		}
     };
@@ -1502,163 +1435,24 @@ public final class RedditIsFun extends ListActivity {
 	    public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
 	    	dismissDialog(Constants.DIALOG_THING_CLICK);
 			if (isChecked) {
-				new VoteTask(mVoteTargetThreadInfo.getName(), -1, mVoteTargetThreadInfo.getSubreddit()).execute();
+				new VoteTask(mVoteTargetThingInfo.getName(), -1, mVoteTargetThingInfo.getSubreddit()).execute();
 			} else {
-				new VoteTask(mVoteTargetThreadInfo.getName(), 0, mVoteTargetThreadInfo.getSubreddit()).execute();
+				new VoteTask(mVoteTargetThingInfo.getName(), 0, mVoteTargetThingInfo.getSubreddit()).execute();
 			}
 		}
     };
     
 	
-    private class ReadCacheTask extends AsyncTask<Void, Void, Boolean> {
-    	@Override
-    	public Boolean doInBackground(Void... zzz) {
-    		FileInputStream fis = null;
-    		ObjectInputStream in = null;
-    		if (!mShouldUseThreadsCache)
-    			return false;
-    		try {
-    			// read the time
-    			fis = openFileInput(Constants.FILENAME_CACHE_TIME);
-    			in = new ObjectInputStream(fis);
-    			mLastRefreshTime = in.readLong();
-    			in.close();
-    			fis.close();
-    			
-    			// Restore previous session from cache, if the cache isn't too old
-    		    if (Common.isFreshCache(mLastRefreshTime)) {
-    		    	fis = openFileInput(Constants.FILENAME_SUBREDDIT_CACHE);
-        			in = new ObjectInputStream(fis);
-        			mAfter = (CharSequence) in.readObject();
-        			mBefore = (CharSequence) in.readObject();
-        			mCount = in.readInt();
-        			mJumpToThreadId = (CharSequence) in.readObject();
-        			mSettings.setSubreddit((CharSequence) in.readObject());
-        			mSortByUrl = (CharSequence) in.readObject();
-        			mSortByUrlExtra = (CharSequence) in.readObject();
-        			mThreadsList = (ArrayList<ThreadInfo>) in.readObject();
-        			mUrlToGetHere = (CharSequence) in.readObject();
-        			mUrlToGetHereChanged = in.readBoolean();
-        	
-        			return true;
-    		    }
-    		    // Cache is old
-    		    return false;
-    		} catch (Exception ex) {
-    			if (Constants.LOGGING) Log.e(TAG, ex.getMessage());
-        		deleteFile(Constants.FILENAME_SUBREDDIT_CACHE);
-        		return false;
-    		} finally {
-	    		try {
-	    			in.close();
-	    		} catch (Exception ignore) {}
-	    		try {
-	    			fis.close();
-	    		} catch (Exception ignore) {}
-    		}
-    	}
-    	
-    	@Override
-    	public void onPreExecute() {
-    		synchronized (mCurrentDownloadThreadsTaskLock) {
-	    		if (mCurrentDownloadThreadsTask != null)
-	    			mCurrentDownloadThreadsTask.cancel(true);
-	    		mCurrentDownloadThreadsTask = this;
-    		}
-    		// If there are comments in the cache, open CommentsListActivity
-    		for (String file : fileList()) {
-        		if (file.equals(Constants.FILENAME_COMMENTS_CACHE)) {
-        			Intent i = new Intent(getApplicationContext(), CommentsListActivity.class);
-        			startActivity(i);
-        			// Stop reading the cache for subreddit
-        			this.cancel(true);
-        			return;
-        		}
-    		}
-    		showDialog(Constants.DIALOG_LOADING_THREADS_CACHE);
-    	}
-    	
-    	@Override
-    	public void onPostExecute(Boolean success) {
-    		if (!isCancelled()) {
-	    		dismissDialog(Constants.DIALOG_LOADING_THREADS_CACHE);
-	    		if (success) {
-	    			// Use the cached threads list
-			    	resetUI(new ThreadsListAdapter(RedditIsFun.this, mThreadsList));
-			    	// Set the title based on subreddit
-			    	if (Constants.FRONTPAGE_STRING.equals(mSettings.subreddit))
-			    		setTitle("reddit.com: what's new online!");
-			    	else
-			    		setTitle("/r/"+mSettings.subreddit.toString().trim());
-	    		} else {
-	    			//Common.showErrorToast("Reading subreddit cache failed.", Toast.LENGTH_SHORT, RedditIsFun.this);
-	    			// Since it didn't read from cache, download normally from Internet.
-	    			new DownloadThreadsTask().execute(mSettings.subreddit);
-	    		}
-    		}
-    	}
-    }
-    
-
-	
 	@Override
     protected void onSaveInstanceState(Bundle state) {
     	super.onSaveInstanceState(state);
-    	state.putCharSequence(ThreadInfo.SUBREDDIT, mSettings.subreddit);
-    	state.putCharSequence(Constants.URL_TO_GET_HERE_KEY, mUrlToGetHere);
+    	state.putCharSequence(Constants.SUBREDDIT_KEY, mSettings.subreddit);
     	state.putCharSequence(Constants.ThreadsSort.SORT_BY_KEY, mSortByUrl);
     	state.putCharSequence(Constants.JUMP_TO_THREAD_ID_KEY, mJumpToThreadId);
-    	state.putInt(Constants.THREAD_COUNT, mCount);
-    	
-    	// Cache
-		if (mThreadsList == null)
-			return;
-		FileOutputStream fos = null;
-		ObjectOutputStream out = null;
-		try {
-			// write the time
-			fos = openFileOutput(Constants.FILENAME_CACHE_TIME, MODE_PRIVATE);
-			out = new ObjectOutputStream(fos);
-			out.writeLong(mLastRefreshTime);
-			out.close();
-			fos.close();
-		} catch (IOException ex) {
-			if (Constants.LOGGING) Log.e(TAG, ex.getLocalizedMessage());
-			deleteFile(Constants.FILENAME_SUBREDDIT_CACHE);
-		} finally {
-			try {
-				out.close();
-			} catch (Exception ignore) {}
-			try {
-				fos.close();
-			} catch (Exception ignore) {}			
-		}
-		
-		try {
-			// Write cache variables in alphabetical order by variable name.
-			fos = openFileOutput(Constants.FILENAME_SUBREDDIT_CACHE, MODE_PRIVATE);
-			out = new ObjectOutputStream(fos);
-			out.writeObject(mAfter);
-			out.writeObject(mBefore);
-			out.writeInt(mCount);
-			out.writeObject(mJumpToThreadId);
-			out.writeObject(mSettings.subreddit);
-			out.writeObject(mSortByUrl);
-			out.writeObject(mSortByUrlExtra);
-			out.writeObject(mThreadsList);
-			out.writeObject(mUrlToGetHere);
-			out.writeBoolean(mUrlToGetHereChanged);
-		} catch (IOException ex) {
-			if (Constants.LOGGING) Log.e(TAG, ex.getLocalizedMessage());
-			deleteFile(Constants.FILENAME_SUBREDDIT_CACHE);
-		} finally {
-			try {
-				out.close();
-			} catch (Exception ignore) {}
-			try {
-				fos.close();
-			} catch (Exception ignore) {}			
-		}
+    	state.putInt(Constants.THREAD_COUNT_KEY, mLastCount);
+    	state.putCharSequence(Constants.LAST_AFTER_KEY, mLastAfter);
+    	state.putCharSequence(Constants.LAST_BEFORE_KEY, mLastBefore);
+    	state.putParcelable(Constants.VOTE_TARGET_THING_INFO_KEY, mVoteTargetThingInfo);
     }
     
     /**
@@ -1670,9 +1464,6 @@ public final class RedditIsFun extends ListActivity {
     protected void onRestoreInstanceState(Bundle state) {
         super.onRestoreInstanceState(state);
         final int[] myDialogs = {
-        	Constants.DIALOG_LOADING_LOOK_OF_DISAPPROVAL,
-        	Constants.DIALOG_LOADING_THREADS_CACHE,
-        	Constants.DIALOG_LOADING_THREADS_LIST,
         	Constants.DIALOG_LOGGING_IN,
         	Constants.DIALOG_LOGIN,
         	Constants.DIALOG_SORT_BY,

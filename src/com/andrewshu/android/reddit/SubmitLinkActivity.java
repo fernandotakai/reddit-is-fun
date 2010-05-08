@@ -44,19 +44,15 @@ import android.app.Activity;
 import android.app.Dialog;
 import android.app.ProgressDialog;
 import android.app.TabActivity;
-import android.content.DialogInterface;
 import android.content.Intent;
-import android.content.DialogInterface.OnCancelListener;
 import android.graphics.drawable.Drawable;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.View.OnClickListener;
-import android.view.View.OnKeyListener;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -156,7 +152,7 @@ public class SubmitLinkActivity extends TabActivity {
 	        Bundle extras = getIntent().getExtras();
 	        if (extras != null) {
 	            // Pull current subreddit and thread info from Intent
-	        	String subreddit = extras.getString(ThreadInfo.SUBREDDIT);
+	        	String subreddit = extras.getString(Constants.EXTRA_SUBREDDIT);
 	    		final EditText submitLinkReddit = (EditText) findViewById(R.id.submit_link_reddit);
 	        	final EditText submitTextReddit = (EditText) findViewById(R.id.submit_text_reddit);
 	        	if (Constants.FRONTPAGE_STRING.equals(subreddit)) {
@@ -229,7 +225,7 @@ public class SubmitLinkActivity extends TabActivity {
     	
     	@Override
     	public String doInBackground(Void... v) {
-    		return Common.doLogin(mUsername, mPassword, mClient, mSettings);
+    		return Common.doLogin(mUsername, mPassword, mSettings, mClient, getApplicationContext());
         }
     	
     	@Override
@@ -255,7 +251,7 @@ public class SubmitLinkActivity extends TabActivity {
     
     
 
-	private class SubmitLinkTask extends AsyncTask<Void, Void, ThreadInfo> {
+	private class SubmitLinkTask extends AsyncTask<Void, Void, ThingInfo> {
     	CharSequence _mTitle, _mUrlOrText, _mSubreddit, _mKind, _mCaptcha;
 		String _mUserError = "Error creating submission. Please try again.";
     	
@@ -268,8 +264,8 @@ public class SubmitLinkActivity extends TabActivity {
     	}
     	
     	@Override
-        public ThreadInfo doInBackground(Void... voidz) {
-        	ThreadInfo newlyCreatedThread = null;
+        public ThingInfo doInBackground(Void... voidz) {
+        	ThingInfo newlyCreatedThread = null;
         	HttpEntity entity = null;
         	
         	String status = "";
@@ -283,7 +279,7 @@ public class SubmitLinkActivity extends TabActivity {
         		CharSequence modhash = Common.doUpdateModhash(mClient);
         		if (modhash == null) {
         			// doUpdateModhash should have given an error about credentials
-        			Common.doLogout(mSettings, mClient);
+        			Common.doLogout(mSettings, mClient, getApplicationContext());
         			if (Constants.LOGGING) Log.e(TAG, "Reply failed because doUpdateModhash() failed");
         			return null;
         		}
@@ -376,12 +372,12 @@ public class SubmitLinkActivity extends TabActivity {
             	
             	entity.consumeContent();
             	
-            	// Getting here means success. Create a new ThreadInfo.
-            	newlyCreatedThread = new ThreadInfo();
+            	// Getting here means success. Create a new ThingInfo.
+            	newlyCreatedThread = new ThingInfo();
             	// We only need to fill in a few fields.
-            	newlyCreatedThread.put(ThreadInfo.ID, newId);
-            	newlyCreatedThread.put(ThreadInfo.SUBREDDIT, newSubreddit);
-            	newlyCreatedThread.put(ThreadInfo.TITLE, _mTitle.toString());
+            	newlyCreatedThread.setId(newId);
+            	newlyCreatedThread.setSubreddit(newSubreddit);
+            	newlyCreatedThread.setTitle(_mTitle.toString());
             	
             	return newlyCreatedThread;
             	
@@ -390,10 +386,10 @@ public class SubmitLinkActivity extends TabActivity {
         			try {
         				entity.consumeContent();
         			} catch (Exception e2) {
-        				if (Constants.LOGGING) Log.e(TAG, e2.getMessage());
+        				if (Constants.LOGGING) Log.e(TAG, "entity.consumeContent():" + e2.getMessage());
         			}
         		}
-        		if (Constants.LOGGING) Log.e(TAG, e.getMessage());
+        		if (Constants.LOGGING) Log.e(TAG, "SubmitLinkTask:" + e.getMessage());
         	}
         	return null;
         }
@@ -405,16 +401,16 @@ public class SubmitLinkActivity extends TabActivity {
     	
     	
     	@Override
-    	public void onPostExecute(ThreadInfo newlyCreatedThread) {
+    	public void onPostExecute(ThingInfo newlyCreatedThread) {
     		dismissDialog(Constants.DIALOG_SUBMITTING);
     		if (newlyCreatedThread == null) {
     			Common.showErrorToast(_mUserError, Toast.LENGTH_LONG, SubmitLinkActivity.this);
     		} else {
         		// Success. Return the subreddit and thread id
     			Intent i = new Intent();
-    			i.putExtra(ThreadInfo.SUBREDDIT, newlyCreatedThread.getSubreddit());
-    			i.putExtra(ThreadInfo.ID, newlyCreatedThread.getId());
-    			i.putExtra(ThreadInfo.TITLE, newlyCreatedThread.getTitle());
+    			i.putExtra(Constants.EXTRA_SUBREDDIT, newlyCreatedThread.getSubreddit());
+    			i.putExtra(Constants.EXTRA_ID, newlyCreatedThread.getId());
+    			i.putExtra(Constants.EXTRA_TITLE, newlyCreatedThread.getTitle());
     			setResult(Activity.RESULT_OK, i);
     			finish();
     		}
@@ -454,14 +450,14 @@ public class SubmitLinkActivity extends TabActivity {
 					try {
 						in.close();
 					} catch (Exception e2) {
-						if (Constants.LOGGING) Log.e(TAG, e2.getMessage());
+						if (Constants.LOGGING) Log.e(TAG, "in.close():" + e2.getMessage());
 					}
 				}
 				if (entity != null) {
 					try {
 						entity.consumeContent();
 					} catch (Exception e2) {
-						if (Constants.LOGGING) Log.e(TAG, e2.getMessage());
+						if (Constants.LOGGING) Log.e(TAG, "entity.consumeContent():" + e2.getMessage());
 					}
 				}
 			}
@@ -560,50 +556,13 @@ public class SubmitLinkActivity extends TabActivity {
 		ProgressDialog pdialog;
 		switch (id) {
 		case Constants.DIALOG_LOGIN:
-    		dialog = new Dialog(this);
-    		dialog.setContentView(R.layout.login_dialog);
-    		dialog.setTitle("Login to reddit.com");
-    		// If user presses "back" then quit.
-    		dialog.setOnCancelListener(new OnCancelListener() {
-    			public void onCancel(DialogInterface d) {
-    				if (!mSettings.loggedIn) {
-	        			returnStatus(Activity.RESULT_CANCELED);
-    				}
-    			}
-    		});
-    		final EditText loginUsernameInput = (EditText) dialog.findViewById(R.id.login_username_input);
-    		final EditText loginPasswordInput = (EditText) dialog.findViewById(R.id.login_password_input);
-    		loginUsernameInput.setOnKeyListener(new OnKeyListener() {
-    			public boolean onKey(View v, int keyCode, KeyEvent event) {
-    		        if ((event.getAction() == KeyEvent.ACTION_DOWN)
-    		        		&& (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_TAB)) {
-    		        	loginPasswordInput.requestFocus();
-    		        	return true;
-    		        }
-    		        return false;
-    		    }
-    		});
-    		loginPasswordInput.setOnKeyListener(new OnKeyListener() {
-    			public boolean onKey(View v, int keyCode, KeyEvent event) {
-    		        if ((event.getAction() == KeyEvent.ACTION_DOWN) && (keyCode == KeyEvent.KEYCODE_ENTER)) {
-        				CharSequence user = loginUsernameInput.getText();
-        				CharSequence password = loginPasswordInput.getText();
-        				dismissDialog(Constants.DIALOG_LOGIN);
-    		        	new LoginTask(user, password).execute(); 
-    		        	return true;
-    		        }
-    		        return false;
-    		    }
-    		});
-    		final Button loginButton = (Button) dialog.findViewById(R.id.login_button);
-    		loginButton.setOnClickListener(new OnClickListener() {
-    			public void onClick(View v) {
-    				CharSequence user = loginUsernameInput.getText();
-    				CharSequence password = loginPasswordInput.getText();
-    				dismissDialog(Constants.DIALOG_LOGIN);
+			dialog = new LoginDialog(this, mSettings, true) {
+				@Override
+				public void onLoginChosen(CharSequence user, CharSequence password) {
+					dismissDialog(Constants.DIALOG_LOGIN);
     				new LoginTask(user, password).execute();
-    		    }
-    		});
+				}
+			};
     		break;
 
        	// "Please wait"
@@ -738,7 +697,7 @@ public class SubmitLinkActivity extends TabActivity {
     	case Constants.ACTIVITY_PICK_SUBREDDIT:
     		if (resultCode == Activity.RESULT_OK) {
     			Bundle extras = intent.getExtras();
-	    		String newSubreddit = extras.getString(ThreadInfo.SUBREDDIT);
+	    		String newSubreddit = extras.getString(Constants.EXTRA_SUBREDDIT);
 	    		if (newSubreddit != null && !"".equals(newSubreddit)) {
 	    			final EditText linkSubreddit = (EditText) findViewById(R.id.submit_link_reddit);
 	    			final EditText textSubreddit = (EditText) findViewById(R.id.submit_text_reddit);

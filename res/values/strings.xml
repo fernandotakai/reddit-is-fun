@@ -25,7 +25,9 @@
     <string name="noThreads">No threads here</string>
     <string name="noComments">No comments here</string>
     <string name="noMessages">Your inbox is empty.</string>
-    <string name="noSubreddits">Loading...</string>
+    <string name="noSubreddits">No subreddits</string>
+    
+    <string name="loading_splash_text">Loading...</string>
     
     <string name="pick_subreddit_label">Subreddit name:</string>
     <string name="pick_subreddit_button">Go</string>
@@ -154,8 +156,8 @@
         <item>MAIL_NOTIFICATION_STYLE_OFF</item>
     </string-array>
     
-    <string name="pref_mail_notification_service">Reddit mail system service</string>
-    <string name="pref_mail_notification_service_dialogtitle">Reddit mail system service</string>
+    <string name="pref_mail_notification_service">Check mail outside app</string>
+    <string name="pref_mail_notification_service_dialogtitle">Check mail outside app</string>
     <string-array name="pref_mail_notification_service_choices">
     	<item>Off</item>
     	<item>Every 5 minutes</item>
@@ -172,6 +174,7 @@
     	<item>MAIL_NOTIFICATION_SERVICE_6HOURS</item>
     	<item>MAIL_NOTIFICATION_SERVICE_1DAY</item>
    	</string-array>
-    
-	
+   	
+   	<string name="pref_load_thumbnails">Show thumbnails</string>
+   	
 </resources>

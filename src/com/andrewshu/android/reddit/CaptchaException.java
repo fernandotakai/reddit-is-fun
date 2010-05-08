@@ -1,5 +1,5 @@
 /*
- * Copyright 2009 Andrew Shu
+ * Copyright 2010 Andrew Shu
  *
  * This file is part of "reddit is fun".
  *
@@ -16,24 +16,12 @@
  * You should have received a copy of the GNU General Public License
  * along with "reddit is fun".  If not, see <http://www.gnu.org/licenses/>.
  */
-
 package com.andrewshu.android.reddit;
 
-import android.app.ProgressDialog;
-import android.content.Context;
-
-public class AutoResetProgressDialog extends ProgressDialog {
-
-	public AutoResetProgressDialog(Context context) {
-		super(context);
-	}
-	public AutoResetProgressDialog(Context context, int theme) {
-		super(context, theme);
-	}
-
-	@Override
-	public void onStart() {
-		super.onStart();
-		setProgress(0);
+public class CaptchaException extends Exception {
+	static final long serialVersionUID = 40;
+	
+	public CaptchaException(String message) {
+		super(message);
 	}
 }

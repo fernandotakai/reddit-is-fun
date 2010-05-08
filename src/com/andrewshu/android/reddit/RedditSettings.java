@@ -38,6 +38,7 @@ public class RedditSettings {
 	// --- Themes ---
 	int theme = R.style.Reddit_Light;
 	int rotation = -1;  // -1 means unspecified
+	boolean loadThumbnails = true;
 	
 	String mailNotificationStyle = Constants.PREF_MAIL_NOTIFICATION_STYLE_DEFAULT;
 	String mailNotificationService = Constants.PREF_MAIL_NOTIFICATION_SERVICE_OFF;
@@ -110,6 +111,10 @@ public class RedditSettings {
 	
 	void setHomepage(CharSequence homepage) {
 		this.homepage = homepage;
+	}
+	
+	void setLoadThumbnails(boolean loadThumbnails) {
+		this.loadThumbnails = loadThumbnails;
 	}
 	
 	void setLoggedIn(boolean loggedIn) {
