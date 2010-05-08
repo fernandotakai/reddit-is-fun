@@ -23,11 +23,7 @@ import android.widget.Toast;
 class SaveTask extends AsyncTask<Void, Void, Boolean> {
 	private static final String TAG = "SaveWorker";
 	
-<<<<<<< HEAD
-	private ThreadInfo mTargetThreadInfo;
-=======
 	private ThingInfo mTargetThreadInfo;
->>>>>>> f5b8ffcfc512f9706cbccdf093359c7505acc61b
 	private String mUserError = "Error voting.";
 	private String mUrl;
 	private boolean mSave;
@@ -37,11 +33,7 @@ class SaveTask extends AsyncTask<Void, Void, Boolean> {
 	
 	private final DefaultHttpClient mClient = Common.getGzipHttpClient();
 	
-<<<<<<< HEAD
-	public SaveTask(boolean mSave, ThreadInfo mVoteTargetThreadInfo, 
-=======
 	public SaveTask(boolean mSave, ThingInfo mVoteTargetThreadInfo, 
->>>>>>> f5b8ffcfc512f9706cbccdf093359c7505acc61b
 								RedditSettings mSettings, Context mContext, 
 								RedditIsFun.ThreadsListAdapter mThreadsListAdapter){
 		if(mSave){
@@ -82,11 +74,7 @@ class SaveTask extends AsyncTask<Void, Void, Boolean> {
     		CharSequence modhash = Common.doUpdateModhash(mClient);
     		if (modhash == null) {
     			// doUpdateModhash should have given an error about credentials
-<<<<<<< HEAD
-    			Common.doLogout(mSettings, mClient);
-=======
     			Common.doLogout(mSettings, mClient, mContext);
->>>>>>> f5b8ffcfc512f9706cbccdf093359c7505acc61b
     			if (Constants.LOGGING) Log.e(TAG, "updating save status failed because doUpdateModhash() failed");
     			return false;
     		}
@@ -152,17 +140,10 @@ class SaveTask extends AsyncTask<Void, Void, Boolean> {
 	public void onPostExecute(Boolean success) {
 		if (success) {
 			if(mSave){
-<<<<<<< HEAD
-				mTargetThreadInfo.setSaved("true");
-				Toast.makeText(mContext, "Saved!", Toast.LENGTH_LONG).show();
-			} else {
-				mTargetThreadInfo.setSaved("false");
-=======
 				mTargetThreadInfo.setSaved(true);
 				Toast.makeText(mContext, "Saved!", Toast.LENGTH_LONG).show();
 			} else {
 				mTargetThreadInfo.setSaved(false);
->>>>>>> f5b8ffcfc512f9706cbccdf093359c7505acc61b
 				Toast.makeText(mContext, "Unsaved!", Toast.LENGTH_LONG).show();
 			}
 			mThreadsListAdapter.notifyDataSetChanged();
